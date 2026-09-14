@@ -53,7 +53,7 @@ Resolve the target before teaching:
 Bootstrap commands for empty-target branch diff mode:
 
 ```
-shell_command:
+exec_command:
   cmd: |
     BASE=$(git rev-parse --verify --quiet origin/main >/dev/null && echo origin/main \
            || (git rev-parse --verify --quiet origin/master >/dev/null && echo origin/master))

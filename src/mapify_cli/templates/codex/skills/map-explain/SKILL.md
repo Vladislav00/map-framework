@@ -32,8 +32,8 @@ Write the explanation in the user's established language — honor the language 
 
 The skill takes a single argument. Resolve it as follows:
 
-- **File path** (`src/foo/bar.py`) → read the entire file with `shell_command` and treat it as the target.
-- **Symbol** (`module.function`, `ClassName.method`) → grep the repo with `shell_command` to find the definition and primary call sites.
+- **File path** (`src/foo/bar.py`) → read the entire file with `exec_command` and treat it as the target.
+- **Symbol** (`module.function`, `ClassName.method`) → grep the repo with `exec_command` to find the definition and primary call sites.
 - **PR ref** (`#123`, branch name, commit SHA) → fetch the diff via `gh pr diff` or `git show`.
 - **Inline snippet** → treat the snippet itself as the target.
 - **Empty / no argument** → fall back to one of the two default modes below.
@@ -43,7 +43,7 @@ The skill takes a single argument. Resolve it as follows:
 Resolve the upstream base, then pick mode A or B.
 
 ```
-shell_command:
+exec_command:
   cmd: |
     # 1. Pick the upstream base: prefer origin/main, fall back to origin/master.
     BASE=$(git rev-parse --verify --quiet origin/main >/dev/null && echo origin/main \
@@ -76,7 +76,7 @@ There is no diff, so skip the before→after block.
 Bootstrap commands:
 
 ```
-shell_command:
+exec_command:
   cmd: |
     ls -la
     git --no-pager log --oneline -n 20
@@ -89,7 +89,7 @@ shell_command:
 The target is the current branch's diff against the upstream base. Treat it like a PR and **lead with the before→after block**.
 
 ```
-shell_command:
+exec_command:
   cmd: |
     BASE=$(git rev-parse --verify --quiet origin/main >/dev/null && echo origin/main \
            || (git rev-parse --verify --quiet origin/master >/dev/null && echo origin/master))

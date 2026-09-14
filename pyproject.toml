@@ -96,7 +96,10 @@ include = [
 [tool.mypy]
 ignore_missing_imports = false
 exclude = [
-    "src/mapify_cli/templates/map/scripts/",
+    # Generated provider trees contain deliberate same-name Claude/Codex
+    # scripts. Type-check their source/runtime suites instead of importing both
+    # generated copies as one Python package namespace.
+    "src/mapify_cli/templates/",
     "tests/skills_eval/fixtures/whole_skill/",
 ]
 
@@ -115,6 +118,7 @@ exclude = [
     "**/__pycache__",
     "**/.*",
     "tests/skills_eval/fixtures/whole_skill",
+    "src/mapify_cli/templates",
 ]
 
 [tool.ruff]

@@ -246,7 +246,22 @@ def _highest_turn_number(scratch_path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-_EDIT_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
+_EDIT_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "apply_patch"})
+_PATCH_PATH_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$", re.MULTILINE
+)
+
+
+def _apply_patch_paths(command: object) -> list[str]:
+    """Return explicit file targets from a Codex ``apply_patch`` command."""
+    if not isinstance(command, str):
+        return []
+    paths = [match.group(1) for match in _PATCH_PATH_RE.finditer(command)]
+    paths.extend(
+        match.group(1)
+        for match in re.finditer(r"^\*\*\* Move to:\s*(.+?)\s*$", command, re.MULTILINE)
+    )
+    return paths
 
 
 def _redact_and_dedup(paths: list[str]) -> list[str]:
@@ -262,14 +277,34 @@ def _redact_and_dedup(paths: list[str]) -> list[str]:
 
 
 def _extract_edit_paths(obj: Any, out: list[str]) -> None:
-    """Recursively collect file paths from Edit/Write/MultiEdit tool_use blocks."""
+    """Recursively collect paths from Claude and Codex transcript records."""
     if isinstance(obj, dict):
         if obj.get("type") == "tool_use" and obj.get("name") in _EDIT_TOOLS:
             tool_input = obj.get("input")
             if isinstance(tool_input, dict):
-                raw_path = tool_input.get("file_path") or tool_input.get("path")
-                if raw_path:
-                    out.append(str(raw_path))
+                if obj.get("name") == "apply_patch":
+                    out.extend(_apply_patch_paths(tool_input.get("command")))
+                else:
+                    raw_path = tool_input.get("file_path") or tool_input.get("path")
+                    if raw_path:
+                        out.append(str(raw_path))
+
+        # Codex JSONL emits completed file-change items with one entry per
+        # changed path.  Keep this intentionally shape-tolerant because the
+        # outer event envelope has changed across Codex releases.
+        if obj.get("type") == "file_change":
+            changes = obj.get("changes")
+            if isinstance(changes, list):
+                for change in changes:
+                    if isinstance(change, dict):
+                        raw_path = change.get("path") or change.get("file_path")
+                        if raw_path:
+                            out.append(str(raw_path))
+
+        tool_name = obj.get("tool_name") or obj.get("name")
+        tool_input = obj.get("tool_input") or obj.get("input")
+        if tool_name == "apply_patch" and isinstance(tool_input, dict):
+            out.extend(_apply_patch_paths(tool_input.get("command")))
         for value in obj.values():
             _extract_edit_paths(value, out)
     elif isinstance(obj, list):
@@ -332,8 +367,7 @@ def _derive_files_touched(
 
     Resolution order:
       1. Inline ``tool_input`` when a PostToolUse-shaped payload carries a
-         ``tool_name`` in {Edit, Write, MultiEdit} (direct/library callers and
-         tests).
+         supported Claude edit tool or Codex ``apply_patch``.
       2. The session transcript referenced by ``transcript_path`` — the Stop
          event that drives capture in production carries no tool fields, so the
          turn's edits are recovered from the transcript (see
@@ -349,9 +383,11 @@ def _derive_files_touched(
         if tool_name not in _EDIT_TOOLS:
             return [], None
         tool_input: dict[str, Any] = stdin_data.get("tool_input") or {}
-        raw_path: str = (
-            tool_input.get("file_path", "") or tool_input.get("path", "") or ""
-        )
+        if tool_name == "apply_patch":
+            return _redact_and_dedup(
+                _apply_patch_paths(tool_input.get("command"))
+            ), None
+        raw_path = tool_input.get("file_path", "") or tool_input.get("path", "")
         if not raw_path:
             return [], None
         return _redact_and_dedup([str(raw_path)]), None

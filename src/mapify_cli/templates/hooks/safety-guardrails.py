@@ -64,6 +64,7 @@ if sys.version_info < (3, 11):  # noqa: UP036
 
 import json
 import os
+import re
 import sys
 
 # =============================================================================
@@ -176,10 +177,6 @@ def check_file_safety(path: str) -> tuple[bool, str]:
     if not path:
         return True, ""
 
-    # Fast path: known safe directories
-    if is_safe_path(path):
-        return True, ""
-
     # Check dangerous patterns against the basename only, not the full path.
     # Matching the full path causes false positives when a directory name contains
     # security-related words (e.g. "secrets-injector", "stackland-secrets-webhook"):
@@ -200,6 +197,11 @@ def check_file_safety(path: str) -> tuple[bool, str]:
                 False,
                 f"Blocked: Access to sensitive file pattern '{pattern}' in path: {path}",
             )
+
+    # Allowlisted directories reduce false positives only after the sensitive
+    # basename blocklist has had a chance to reject nested credential files.
+    if is_safe_path(path):
+        return True, ""
 
     return True, ""
 
@@ -433,6 +435,23 @@ def deny(reason: str) -> None:
     sys.exit(0)
 
 
+def extract_apply_patch_paths(command: object) -> list[str]:
+    """Extract only explicit Codex apply_patch file headers."""
+    if not isinstance(command, str):
+        return []
+    paths: list[str] = []
+    for pattern in (
+        r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$",
+        r"^\*\*\* Move to:\s*(.+?)\s*$",
+    ):
+        paths.extend(
+            match.group(1).strip()
+            for match in re.finditer(pattern, command, re.MULTILINE)
+            if match.group(1).strip()
+        )
+    return list(dict.fromkeys(paths))
+
+
 def main() -> None:
     try:
         input_data = json.load(sys.stdin)
@@ -456,6 +475,16 @@ def main() -> None:
             is_safe, reason = check_verifier_path(file_path)
             if not is_safe:
                 deny(f"{reason} (tool={tool_name})")
+
+    elif tool_name == "apply_patch":
+        for file_path in extract_apply_patch_paths(tool_input.get("command", "")):
+            is_safe, reason = check_file_safety(file_path)
+            if not is_safe:
+                deny(f"{reason} (tool={tool_name})")
+            if verifier:
+                is_safe, reason = check_verifier_path(file_path)
+                if not is_safe:
+                    deny(f"{reason} (tool={tool_name})")
 
     # Check bash commands
     elif tool_name == "Bash":

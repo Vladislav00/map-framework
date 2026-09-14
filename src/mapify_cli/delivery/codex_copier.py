@@ -88,15 +88,45 @@ def _copy_tree(
 
 
 _EXEC_SUFFIXES = frozenset((".py", ".sh"))
-_CODEX_WORKFLOW_GATE_PATH = ".codex/hooks/workflow-gate.py"
+_CODEX_MANAGED_HOOK_NAMES = frozenset(
+    {
+        "context-meter.py",
+        "detect-clarification-triggers.py",
+        "end-of-turn.sh",
+        "map-memory-capture.py",
+        "map-memory-endmark.py",
+        "map-memory-finalize.py",
+        "map-memory-recall.py",
+        "map-memory-session.py",
+        "map-stop.py",
+        "map-token-meter.py",
+        "post-compact-context.py",
+        "pre-compact-save-transcript.py",
+        "ralph-context-pruner.py",
+        "ralph-iteration-logger.py",
+        "safety-guardrails.py",
+        "scrub-internal-ids.py",
+        "workflow-context-injector.py",
+        "workflow-gate.py",
+    }
+)
 
 
 def _is_codex_workflow_gate_hook(hook: Any) -> bool:
-    """Return True for MAP's managed Codex workflow-gate command hook."""
+    """Return True for a MAP-managed Codex command hook.
+
+    The historical function name is retained for callers, but every script
+    below ``.codex/hooks/`` is MAP-owned and must be refreshed atomically on
+    reinstall so changed registrations do not accumulate stale duplicates.
+    """
     if not isinstance(hook, dict):
         return False
     command = hook.get("command")
-    return isinstance(command, str) and _CODEX_WORKFLOW_GATE_PATH in command
+    if not isinstance(command, str):
+        return False
+    return any(
+        f".codex/hooks/{name}" in command for name in _CODEX_MANAGED_HOOK_NAMES
+    )
 
 
 def _merge_codex_hook_entries(
@@ -279,7 +309,9 @@ def create_codex_files(project_path: Path) -> dict[str, int]:
             entry = skill_catalog.get(skill_name, {})
             requires_block = _extract_requires_block(skill_name, entry)
 
-            req_skills = entry.get("requires-skills") if isinstance(entry, dict) else None
+            req_skills = (
+                entry.get("requires-skills") if isinstance(entry, dict) else None
+            )
             if isinstance(req_skills, list) and req_skills:
                 _warn_requires_skills(skill_name, req_skills)
 
@@ -294,6 +326,16 @@ def create_codex_files(project_path: Path) -> dict[str, int]:
             counts["skills"] += _copy_tree(skill_dir, skill_dst, version)
 
         _prune_catalog_entries(agents_dir / "skills" / "skill-rules.json", skipped)
+
+    # Provider-neutral references used by Codex skills. They intentionally live
+    # under .agents/references so ../../references links from each skill resolve.
+    references_src = codex_templates / "references"
+    if references_src.exists():
+        counts["docs"] += _copy_tree(
+            references_src,
+            agents_dir / "references",
+            version,
+        )
 
     # ------------------------------------------------------------------
     # 2. Agents (*.toml) — watched (fence-aware)

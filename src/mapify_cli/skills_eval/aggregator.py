@@ -194,6 +194,7 @@ def bounded_run(
     out_path: Path,
     resume: bool = False,
     max_concurrency: int = 1,
+    provider: str | None = None,
 ) -> list[EvalResultRecord]:
     """Run the prompts x runs matrix with bounded parallel dispatch.
 
@@ -233,7 +234,7 @@ def bounded_run(
     # Determine the complete set of cells to skip (resume mode).
     present_cell_ids: set[str] = set()
     if resume and out_path.exists():
-        present_cell_ids = _read_present_cell_ids(out_path)
+        present_cell_ids = _read_present_cell_ids(out_path, provider)
         logger.info(
             "bounded_run: resume mode -- %d cells already present in %s",
             len(present_cell_ids),
@@ -271,6 +272,7 @@ def bounded_run(
             prompt_index=prompt_idx,
             run_number=run_num,
             dispatcher=dispatcher,
+            provider=provider,
         )
         with write_lock:
             # INV-4: durable per-cell append-and-flush, serialised.

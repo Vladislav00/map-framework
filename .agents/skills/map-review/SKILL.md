@@ -15,7 +15,7 @@ Interactive, structured code review of current changes using monitor,
 predictor, and evaluator agents, plus two role reviewers — `user_experience`
 (did the already-shipped path get worse?) and `maintainer` (what rot survives
 the merge?). This skill is the Codex counterpart to
-Claude `/map-review`: it uses Codex-native dispatch (`spawn_agent`) for
+Claude `$map-review`: it uses Codex-native dispatch (`spawn_agent`) for
 independent reviewer passes, and the current Codex session drives bundle
 setup, verification gates, and presentation.
 
@@ -81,20 +81,20 @@ These constraints apply before any write-capable step:
 
 ```bash
 CI_MODE=false
-if echo "$ARGUMENTS" | grep -qE -- '--(ci|auto)'; then
+if printf '%s' "$ARGUMENTS" | grep -qE -- '--(ci|auto)'; then
   CI_MODE=true
 fi
 
 ADVERSARIAL_FLAG=false
-if echo "$ARGUMENTS" | grep -q -- '--adversarial'; then
+if printf '%s' "$ARGUMENTS" | grep -q -- '--adversarial'; then
   ADVERSARIAL_FLAG=true
 fi
 
 CROSS_AI_FLAG=false
 CROSS_AI_RUNTIME=""
-if echo "$ARGUMENTS" | grep -qE -- '--cross-ai'; then
+if printf '%s' "$ARGUMENTS" | grep -qE -- '--cross-ai'; then
   CROSS_AI_FLAG=true
-  CROSS_AI_RUNTIME=$(echo "$ARGUMENTS" | sed -nE 's/.*--cross-ai[ =]([a-z][a-z0-9-]*).*/\1/p')
+  CROSS_AI_RUNTIME=$(printf '%s' "$ARGUMENTS" | sed -nE 's/.*--cross-ai[ =]([a-z][a-z0-9-]*).*/\1/p')
 fi
 ```
 
@@ -122,7 +122,7 @@ otherwise) and mode semantics.
 ### Step A.1: Gather changes
 
 Diff against the **merge-base with the default branch**, not `HEAD`. On a
-fully-committed branch — the normal `/map-check` → `/map-review` state —
+fully-committed branch — the normal `$map-check` → `$map-review` state —
 `git diff HEAD` is empty and under-reports the review scope to zero (#426).
 
 ```bash
@@ -173,33 +173,43 @@ to `lite`/`full`/`ultra`), also dispatch the complexity lens using the
 ```text
 spawn_agent(
   agent_type="monitor",
+
+  task_name="map_review_monitor_2",
   message=MONITOR_PROMPT
 )
 # Full mode only — skip in lightweight mode (monitor-only):
 spawn_agent(
   agent_type="predictor",
+
+  task_name="map_review_predictor_3",
   message=PREDICTOR_PROMPT
 )
 # Full mode only — skip in lightweight mode (monitor-only):
 spawn_agent(
   agent_type="evaluator",
+
+  task_name="map_review_evaluator_4",
   message=EVALUATOR_PROMPT
 )
 # Full mode only — role reviewers run with isolated context (diff + bundle).
-# They reuse the `evaluator` agent type the same way the complexity lens does:
-# the configured Codex agents are decomposer/monitor/researcher/predictor/
-# evaluator, and what the pass does is defined by its prompt, not by the type.
+# Use the configured impact and documentation review roles.
 spawn_agent(
-  agent_type="evaluator",
+  agent_type="predictor",
+
+  task_name="map_review_user_experience_5",
   message=USER_EXPERIENCE_PROMPT
 )
 spawn_agent(
-  agent_type="evaluator",
+  agent_type="documentation-reviewer",
+
+  task_name="map_review_maintainer_6",
   message=MAINTAINER_PROMPT
 )
 # When COMPLEXITY_LENS_ENABLED=true only:
 spawn_agent(
   agent_type="evaluator",
+
+  task_name="map_review_evaluator_7",
   message=COMPLEXITY_LENS_PROMPT
 )
 ```
@@ -367,7 +377,7 @@ Choose exactly one:
 Exactly one Final Verdict value is emitted per review run, regardless of
 which mode produced it (cross-AI success, adversarial aggregation, or the
 normal 4-section walkthrough) — the same convergence rule Claude
-`/map-review` uses. Set `FINAL_VERDICT` to this value before Workflow Gate
+`$map-review` uses. Set `FINAL_VERDICT` to this value before Workflow Gate
 Unlock and Handoff Artifacts below.
 
 ## Workflow Gate Unlock (REVISE/BLOCK only) and Handoff Artifacts

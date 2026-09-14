@@ -24,7 +24,7 @@ When a MAP run enters a merge/rebase conflict, the PreToolUse workflow-context h
 
 ## Python interpreter requirement (`python3` on PATH)
 
-MAP's runtime surfaces — every hook in `.claude/hooks/` and `.codex/hooks/`, and every runner in `.map/scripts/` — are executables that start with `#!/usr/bin/env python3`. They therefore run under the `python3` your shell resolves, **not** under the interpreter that ran `mapify` (with `uvx`/`uv tool run` that is a temporary environment whose `bin` is prepended to `PATH` only for the duration of the command). They require Python 3.11+; on a stock macOS `python3` is `/usr/bin/python3` (3.9), where they all fail at import.
+MAP's runtime surfaces — every hook in `.claude/hooks/` and `.codex/hooks/`, and every runner in `.map/scripts/` — are executables that start with `#!/usr/bin/env python3`. They therefore start under the `python3` your shell resolves, **not** under the interpreter that ran `mapify` (with `uvx`/`uv tool run` that is a temporary environment whose `bin` is prepended to `PATH` only for the duration of the command). They require Python 3.11+; on a stock macOS `python3` is `/usr/bin/python3` (3.9), where the version guard reports the mismatch. Codex memory hooks then delegate memory operations to the installed `mapify _memory-hook` runtime, avoiding imports from the target project or ambient system interpreter.
 
 Three checks cover this:
 
@@ -40,7 +40,10 @@ mapify check               # confirms the hook interpreter
 
 ## Decision-frontier wayfinding (`/map-wayfind`)
 
-For a large or foggy effort where `/map-plan` would force premature decomposition, `/map-wayfind` resolves the open design decisions **before** planning. It is a Claude-only, manually-invoked skill; if the scope is already clear enough to specify, skip it and run `/map-plan` directly.
+For a large or foggy effort where `/map-plan` would force premature decomposition,
+`/map-wayfind` (Claude) or `$map-wayfind` (Codex) resolves the open design
+decisions **before** planning. If the scope is already clear enough to specify,
+skip it and run the provider's `map-plan` entry point directly.
 
 You reach it two ways: invoke it yourself, or let `/map-plan` send you. `/map-plan`'s Workflow-Fit Gate now has a `map-wayfind` outcome — when it finds the task too foggy to specify (several core decisions unresolved and entangled, not just "needs a little research"), it recommends `/map-wayfind chart "…"` and stops instead of writing a spec dominated by Open Questions. That closes the loop: `/map-plan` → (too foggy) → `/map-wayfind` → handoff → `/map-plan --wayfind <slug>`.
 
@@ -133,7 +136,7 @@ When the deliverable is the human understanding rather than new code or saved pr
 
 For workflow diagnosis, `/map-efficient`, `/map-debug`, `/map-check`, and `/map-review` now call `python3 .map/scripts/map_step_runner.py write_run_health_report <workflow> [terminal_status]` during closeout. This writes `.map/<branch>/run_health_report.json` and records the `run_health` stage in `artifact_manifest.json`. The report captures terminal status, current step/subtask, completed and pending step counts, artifact presence, retry counters, latest hook-injection status, skipped hook reasons for malformed input or insignificant Bash commands when state can be updated safely, Predictor skip/call flags when present, final-verifier evidence when a verification summary exists, and advisory research signals: artifact counts, parsed status/confidence/location counts, low-confidence warnings, and research-token share. To assert the report in CI or during operator handoff, run `python3 .map/scripts/map_step_runner.py validate_run_health_report [path]`; it exits non-zero when a complete report still has pending steps, lacks verification evidence, exceeds retry thresholds, has schema drift, or records hook degradation without a reason.
 
-At workflow completion, the `scrub-internal-ids.py` Stop hook removes MAP-internal workflow IDs (`ST-`/`AC-`/`VC-`/`INV-`/`HC-`) that leaked into the code a run changed — in **comments** and `vc<n>` test names — and commits the result as `chore(map): strip internal workflow IDs`. It is hard-scoped to the run's git diff (IDs you wrote yourself on untouched lines are never modified) and to recognized source files (each language's comment syntax). IDs in code, string literals, docstrings, and data files (`.json`, …) are left intact and only reported, to avoid corrupting legitimate values. It runs exactly once per completed run and can be turned off with `scrub_internal_ids: false` in `.map/config.yaml`. (Claude provider only — the Codex hook model has no `Stop` event; the engine still ships to `.map/scripts/`.)
+At workflow completion, the `scrub-internal-ids.py` Stop hook removes MAP-internal workflow IDs (`ST-`/`AC-`/`VC-`/`INV-`/`HC-`) that leaked into the code a run changed — in **comments** and `vc<n>` test names — and commits the result as `chore(map): strip internal workflow IDs`. It is hard-scoped to the run's git diff (IDs you wrote yourself on untouched lines are never modified) and to recognized source files (each language's comment syntax). IDs in code, string literals, docstrings, and data files (`.json`, …) are left intact and only reported, to avoid corrupting legitimate values. It runs exactly once per completed run on both Claude and Codex and can be turned off with `scrub_internal_ids: false` in `.map/config.yaml`.
 
 When Monitor rejects the same implementation path repeatedly, MAP now separates ordinary feedback retries from clean-room retries. The first rejection can feed Monitor feedback back to Actor normally. The second or later rejection for the same subtask marks `retry_isolation=clean_retry_required`, writes `.map/<branch>/retry_quarantine.json`, and requires the next Actor attempt to rebuild context from durable artifacts plus the compact quarantine summary instead of rehydrating the raw failed context. Validate the artifact with `python3 .map/scripts/map_step_runner.py validate_retry_quarantine`; `/map-resume` will surface the quarantine path if a session is interrupted mid-clean-retry.
 
@@ -525,8 +528,11 @@ The sentinel lives beside the permissions it governs so the two cannot drift
 apart. The hook catches realistic (sloppy / model-generated) bypasses, not a
 determined adversary — pair it with branch protection for an absolute guarantee.
 
-The codex provider installs neither `settings.local.json` nor this hook, so
-`--autonomy` / `--no-autonomy` is ignored there (with a note).
+The Codex provider does not install Claude's `settings.local.json`, so
+`--autonomy` / `--no-autonomy` is ignored there (with a note). It does install
+the same `safety-guardrails.py` policy hook for `Bash` and `apply_patch`; the
+autonomy-only commit/push restriction remains inactive without the Claude
+sentinel.
 
 ## Codex CLI Provider
 
@@ -538,48 +544,48 @@ MAP Framework supports OpenAI's Codex CLI as an alternative to Claude Code.
 mapify init . --provider codex
 ```
 
-After starting Codex, enable the installed hook manually:
-
-```text
-/hooks
-PreToolUse
-t
-Esc
-```
-
-This toggles the `PreToolUse` hook on so MAP's workflow gate can run before tool calls.
-
-If your Codex version does not support the `hooks` feature key yet, either start Codex with the deprecated hooks feature alias enabled:
-
-```bash
-codex --enable codex_hooks
-```
-
-or upgrade Codex first. Upgrading is recommended.
+The generated `.codex/config.toml` enables Codex hooks. Review the project hook
+configuration if Codex requests trust on first use; `/hooks` shows the active
+registrations.
 
 This creates a Codex layout instead of `.claude/`:
-- `.agents/skills/map-plan/SKILL.md` — main planning skill
-- `.agents/skills/map-efficient/SKILL.md` — state-machine plan execution
-- `.agents/skills/map-fast/SKILL.md` — quick implementation
-- `.agents/skills/map-check/SKILL.md` — quality gates
-- `.codex/agents/*.toml` — agent definitions (researcher, decomposer, monitor)
-- `.codex/config.toml` — project configuration
-- `.codex/hooks.json` + `.codex/hooks/workflow-gate.py` — edit gate enforcement
-- `.map/scripts/` — shared orchestrator scripts (same as Claude provider)
 
-On reinstall or upgrade, MAP merges its `PreToolUse`/`Bash` workflow gate into
-an existing `.codex/hooks.json` instead of replacing project hook registrations.
-The installed `hooks.json` keeps Codex's strict top-level schema: only `hooks`.
+- `.agents/skills/` — all 23 MAP skills, including planning, execution, review,
+  debugging, TDD, learning, memory, release, SOFA, state, and wayfinding entry points
+- `.agents/references/` — provider-neutral prompt/output contracts used by skills
+- `.codex/agents/*.toml` — nine roles: actor, researcher, decomposer, monitor,
+  predictor, evaluator, reflector, final-verifier, and documentation-reviewer
+- `.codex/config.toml` — hooks plus bounded subagent depth/concurrency
+- `.codex/hooks.json` + `.codex/hooks/` — lifecycle policy, context, compaction,
+  memory, token-accounting, logging, cleanup, and end-of-turn checks
+- `.map/scripts/` — shared deterministic orchestrator runtime
+
+Codex registers `SessionStart`, `SessionEnd`, `PreToolUse`, `PostToolUse`,
+`PreCompact`, `SubagentStop`, `Stop`, and `UserPromptSubmit`. Re-prime context
+after compaction uses Codex's supported `SessionStart` matcher `compact`.
+`apply_patch` payloads and Codex `turn.completed` / `file_change` transcript
+records are translated into MAP's workflow-gate, memory, and token contracts.
+Session-start memory finalization and recall run through one ordered wrapper so
+they cannot race even though Codex executes peer hook handlers concurrently.
+
+On reinstall or upgrade, MAP removes stale MAP-owned `.codex/hooks/` handlers,
+merges the current registrations, and preserves unrelated project hooks. The
+installed `hooks.json` keeps Codex's strict top-level schema: only `hooks`.
 
 ### Using MAP with Codex
 
 ```bash
-$map-plan    # Plan and decompose complex tasks
-$map-fast    # Quick implementation with minimal validation
-$map-check   # Quality gates and verification
+$map-plan       # Plan and decompose complex tasks
+$map-efficient  # Execute an approved plan with Actor/Monitor gates
+$map-review     # Multi-role review
+$map-fast       # Quick implementation with minimal validation
+$map-check      # Quality gates and verification
 ```
 
 Codex MAP skills do not start with `/`. Type `$map-plan`, not `/map-plan`.
+Skills dispatch configured Codex subagents through `spawn_agent` and continue
+retries through `followup_task`; read-only roles cannot mutate the worktree,
+while only Actor receives `workspace-write`.
 
 ### Diagnostics
 
@@ -2028,8 +2034,8 @@ Examples:
 | Skills | Agents |
 |--------|--------|
 | Define provider-facing slash surfaces, instructions, policies, hooks, scripts, and supporting files | Perform specialized analysis, implementation, review, or learning work |
-| May call agents when the skill is a task workflow | Are launched by skills or commands through the Task tool |
-| Live under `.claude/skills/` in Claude installs | Live under `.claude/agents/` |
+| May call agents when the skill is a task workflow | Are launched through Claude's Task tool or Codex `spawn_agent`/`followup_task` |
+| Live under `.claude/skills/` for Claude or `.agents/skills/` for Codex | Live under `.claude/agents/` for Claude or `.codex/agents/` for Codex |
 
 ### Creating Custom Skills
 

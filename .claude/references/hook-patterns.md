@@ -52,6 +52,8 @@ the top-level session. They early-exit when the flag is set.
 | `map-memory-endmark.py` | `SessionEnd` | No | End-marker belongs to the top-level session WAL; a nested run must not write an ended marker into the parent's scratch |
 | `map-memory-finalize.py` | `SessionStart` | No | Digest finalization is a top-level-session concern; a nested run must not finalize the parent's session scratch |
 | `map-memory-recall.py` | `SessionStart` + `UserPromptSubmit` | No | Recall injection targets the top-level session; a nested run must not recall from or inject into the parent's context |
+| `map-memory-session.py` | `SessionStart` (Codex composite) | No | The composite finalizes and recalls top-level session memory; nested runs must not touch the parent's memory lifecycle |
+| `map-stop.py` | `Stop` (Codex dispatcher) | No | The dispatcher only sequences top-level Stop handlers; nested runs must not launch parent cleanup, telemetry, or memory capture |
 
 > **Intentional consequence:** suppressing `end-of-turn.sh` and
 > `ralph-iteration-logger.py` in nested runs means a nested Actor's lint

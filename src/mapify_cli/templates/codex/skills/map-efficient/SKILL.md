@@ -12,10 +12,11 @@ For `updated`, re-read this invoked skill's installed `SKILL.md`, skip its alrea
 # $map-efficient - MAP Execution
 
 Execute the approved MAP plan for the current branch. This skill is the Codex
-counterpart to Claude `/map-efficient`, but it uses Codex-native instructions:
-skills live under `.agents/skills`, configured Codex subagents live under
-`.codex/agents`, and the current Codex session is the write-capable Actor and
-final verifier unless an explicit subagent dispatch is available and useful.
+counterpart to Claude `$map-efficient`, but it uses Codex-native instructions:
+skills live under `.agents/skills` and configured Codex subagents live under
+`.codex/agents`. The parent session orchestrates; `actor` owns isolated
+implementation work, `monitor` independently reviews it, and `final-verifier`
+performs the whole-plan verification gate.
 
 Use [efficient-reference.md](efficient-reference.md) for wave details, retry
 recipes, TDD mode, commit policy, and troubleshooting. Read only the referenced
@@ -44,7 +45,11 @@ These constraints apply before any write-capable step:
 3. Never edit `step_state.json` manually. Use `.map/scripts/map_orchestrator.py`.
 4. Use `.map/scripts/map_step_runner.py` for analysis, reports, baselines, and sidecar artifacts.
 5. Continue across subtask boundaries in the same invocation unless blocked, interrupted by the user, or the circuit breaker trips.
-6. Use configured Codex subagents (`researcher`, `decomposer`, `monitor`) only when the workflow explicitly needs independent work. The current Codex session performs Actor edits and final verification.
+6. Use configured Codex subagents (`researcher`, `decomposer`, `actor`,
+   `monitor`, `predictor`, `evaluator`, `reflector`, `final-verifier`) when the
+   named phase requires an independent role. The parent session remains the
+   orchestrator and may implement directly only when dispatch is unavailable or
+   isolation would add no value.
 7. Stop on any Monitor `valid=false` verdict and fix the issue before advancing.
 
 ## Script Routing
@@ -69,9 +74,9 @@ already exists.
 ```bash
 TASK_ARGS="$ARGUMENTS"
 TDD_FLAG=false
-if echo "$TASK_ARGS" | grep -q -- '--tdd'; then
+if printf '%s' "$TASK_ARGS" | grep -q -- '--tdd'; then
   TDD_FLAG=true
-  TASK_ARGS=$(echo "$TASK_ARGS" | sed 's/--tdd//g' | xargs)
+  TASK_ARGS=$(printf '%s' "$TASK_ARGS" | sed 's/--tdd//g' | xargs)
 fi
 ```
 
@@ -129,7 +134,7 @@ NEXT_STEP=$(python3 .map/scripts/map_orchestrator.py get_next_step)
 STEP_ID=$(printf '%s' "$NEXT_STEP" | jq -r '.step_id')
 PHASE=$(printf '%s' "$NEXT_STEP" | jq -r '.phase')
 IS_COMPLETE=$(printf '%s' "$NEXT_STEP" | jq -r '.is_complete')
-echo "$NEXT_STEP"
+printf '%s\n' "$NEXT_STEP"
 ```
 
 If `IS_COMPLETE=true`, go to final verification.
@@ -235,6 +240,23 @@ Implement exactly the current subtask. Preserve validation criteria,
 coverage_map tags, hard constraints, and documented tradeoffs. Keep edits
 inside the current subtask boundary.
 
+For isolated or wave execution, dispatch the configured Actor with the complete
+context and explicit ownership. Agents share the repository, so tell it not to
+revert concurrent edits:
+
+```text
+ACTOR_TASK_NAME="actor_<normalized_subtask>_<attempt>"
+spawn_agent(
+  agent_type="actor",
+  task_name=ACTOR_TASK_NAME,
+  message="Implement only <subtask_id>. Owned files: <files>. Consume the supplied MAP context and research. You are not alone in the codebase; preserve others' edits and return the Actor change-summary contract."
+)
+```
+
+Normalize the actual subtask id before dispatch (`ST-001` -> `st_001`), replace
+the placeholders in `ACTOR_TASK_NAME`, and include the attempt number; every
+resolved `task_name` must match `^[a-z0-9_]+$` and be unique in the thread.
+
 Before Monitor, run the required pre-dispatch gates from
 [efficient-reference.md](efficient-reference.md#pre-monitor-gates):
 
@@ -302,10 +324,27 @@ Run final verification for the whole plan, not only the last subtask.
 python3 .map/scripts/map_orchestrator.py check_circuit_breaker
 ```
 
-Inspect the task plan, state file, artifact manifest, final diff, tests, and
-Monitor artifacts. Run the focused and full verification commands required by
-the plan. Close only when the implemented behavior and tests satisfy all
-subtasks.
+Dispatch the configured `final-verifier` with the task plan, state file,
+artifact manifest, final diff, test commands, and Monitor artifacts. It may
+write only its `.map/` verification artifacts and must return its structured
+verdict. If dispatch is unavailable, run the identical protocol independently
+in the parent session. Close only when the verifier reports `passed=true` and
+the implemented behavior and tests satisfy all subtasks.
+
+```text
+FINAL_VERIFIER_TASK_NAME="final_verify_<normalized_branch>_<iteration>"
+spawn_agent(
+  agent_type="final-verifier",
+  task_name=FINAL_VERIFIER_TASK_NAME,
+  message="Read the whole MAP plan, state, manifest, final diff, Monitor artifacts, and required test commands. Write only .map/ verification artifacts and return the final-verification JSON contract. Do not edit product code."
+)
+```
+
+Wait for the result. Malformed or missing JSON is a failed gate and must be
+retried once with `followup_task`; a second malformed response stops the
+workflow. `passed=false` follows `root_cause.fix_type`: return to the affected
+Actor subtask for `code_fix`, re-decompose for `plan_change`/`both`, and never
+mark the run complete. Only `passed=true` may proceed to run-health completion.
 
 Write terminal run health:
 

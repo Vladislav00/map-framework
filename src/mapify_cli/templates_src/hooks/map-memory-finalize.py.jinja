@@ -41,7 +41,8 @@ def main() -> None:
         timeout = 50
     try:
         incoming = resolve_session_id(input_data, PROJECT_DIR)
-        finalize_dirty(incoming, PROJECT_DIR, timeout)
+        provider = os.environ.get("MAP_PROVIDER", "claude")
+        finalize_dirty(incoming, PROJECT_DIR, timeout, provider=provider)
     except Exception:   # noqa: BLE001, S110 — hooks must never block
         pass
     _silent()

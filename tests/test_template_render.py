@@ -13,6 +13,7 @@ from __future__ import annotations
 import filecmp
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
@@ -325,14 +326,14 @@ class TestRenderTree:
 
         hook_dest = dest_root / ".claude" / "hooks" / "no-exec-hook.py"
         assert hook_dest.is_file()
-        assert os.access(
-            hook_dest, os.X_OK
-        ), "rendered hook must be executable even when the .jinja source is not"
+        assert os.access(hook_dest, os.X_OK), (
+            "rendered hook must be executable even when the .jinja source is not"
+        )
         plain_dest = dest_root / "plain.txt"
         assert plain_dest.is_file()
-        assert not os.access(
-            plain_dest, os.X_OK
-        ), "non-hook files must not be force-marked executable"
+        assert not os.access(plain_dest, os.X_OK), (
+            "non-hook files must not be force-marked executable"
+        )
 
     def test_vc2_dry_run_does_not_write_live(self, tmp_path: Path) -> None:
         """dry_run=True must not write any live files."""
@@ -493,9 +494,9 @@ class TestBrokenTemplateAbort:
             )
 
         # The pre-seeded hook must be byte-unchanged
-        assert (
-            sentinel.read_bytes() == sentinel_content
-        ), "Live hook was mutated despite broken template!"
+        assert sentinel.read_bytes() == sentinel_content, (
+            "Live hook was mutated despite broken template!"
+        )
 
     def test_vc3_stray_delimiter_raises_without_mutating_hooks(
         self, tmp_path: Path
@@ -558,9 +559,9 @@ class TestBrokenTemplateAbort:
                 dest_root=dest_root,
             )
 
-        assert not (
-            dest_root / ".claude" / "hooks" / "new-hook.py"
-        ).exists(), "Hook was created despite broken template!"
+        assert not (dest_root / ".claude" / "hooks" / "new-hook.py").exists(), (
+            "Hook was created despite broken template!"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -662,9 +663,9 @@ class TestRenderRepoTreesClaude:
                 continue
             rendered = dest / rel
             assert rendered.exists(), f"Rendered file missing: {rel}"
-            assert filecmp.cmp(
-                rendered, committed, shallow=False
-            ), f"Byte-parity FAILED for templates/{rel}"
+            assert filecmp.cmp(rendered, committed, shallow=False), (
+                f"Byte-parity FAILED for templates/{rel}"
+            )
 
     @_skip_no_templates_src
     def test_vc1_claude_dest_byte_identity(self, tmp_path: Path) -> None:
@@ -702,9 +703,9 @@ class TestRenderRepoTreesClaude:
                 continue
             rendered = dest / rel
             assert rendered.exists(), f"Rendered file missing for .claude/{rel}"
-            assert filecmp.cmp(
-                rendered, committed, shallow=False
-            ), f"Byte-parity FAILED for .claude/{rel}"
+            assert filecmp.cmp(rendered, committed, shallow=False), (
+                f"Byte-parity FAILED for .claude/{rel}"
+            )
 
     @_skip_no_templates_src
     def test_vc1_sofa_surfaces_golden_byte_identity(self, tmp_path: Path) -> None:
@@ -736,9 +737,9 @@ class TestRenderRepoTreesClaude:
         for left, right in cross_tree_pairs:
             assert left.is_file(), f"missing SOFA artifact: {left}"
             assert right.is_file(), f"missing SOFA artifact: {right}"
-            assert filecmp.cmp(
-                left, right, shallow=False
-            ), f"cross-tree parity FAILED: {left} != {right} — run make render-templates"
+            assert filecmp.cmp(left, right, shallow=False), (
+                f"cross-tree parity FAILED: {left} != {right} — run make render-templates"
+            )
 
         # (b) fresh-render parity — render into a tmp dest and compare the SOFA
         # files (rel to _TEMPLATES_DEST) to the committed templates copies.
@@ -753,9 +754,9 @@ class TestRenderRepoTreesClaude:
             committed = _TEMPLATES_DEST / rel
             rendered = dest / rel
             assert rendered.exists(), f"Rendered SOFA file missing: {rel}"
-            assert filecmp.cmp(
-                rendered, committed, shallow=False
-            ), f"Golden byte-parity FAILED for SOFA surface {rel}"
+            assert filecmp.cmp(rendered, committed, shallow=False), (
+                f"Golden byte-parity FAILED for SOFA surface {rel}"
+            )
 
     @_skip_no_templates_src
     def test_vc1_shipped_only_not_written_to_claude(self) -> None:
@@ -773,9 +774,9 @@ class TestRenderRepoTreesClaude:
         written_strs = [str(p) for p in result]
         for rel in _SHIPPED_ONLY_RELS:
             claude_path = str(_CLAUDE_ROOT / rel)
-            assert (
-                claude_path not in written_strs
-            ), f"Shipped-only file was incorrectly written to .claude/: {claude_path}"
+            assert claude_path not in written_strs, (
+                f"Shipped-only file was incorrectly written to .claude/: {claude_path}"
+            )
 
     @_skip_no_templates_src
     def test_settings_json_written_to_both_destinations(self) -> None:
@@ -794,9 +795,9 @@ class TestRenderRepoTreesClaude:
         written_strs = [str(p) for p in result]
         templates_path = str(_TEMPLATES_DEST / "settings.json")
         claude_path = str(_CLAUDE_ROOT / "settings.json")
-        assert (
-            templates_path in written_strs
-        ), "settings.json was NOT written to templates/ — check renderer destination map"
+        assert templates_path in written_strs, (
+            "settings.json was NOT written to templates/ — check renderer destination map"
+        )
         assert claude_path in written_strs, (
             "settings.json was NOT written to .claude/ — shipped-only classification "
             "must be removed (issue #390 regression)"
@@ -834,12 +835,12 @@ class TestRenderRepoTreesClaude:
         templates_path = str(_TEMPLATES_DEST / "map" / "scripts" / sample)
         map_path = str(_MAP_ROOT / "scripts" / sample)
 
-        assert (
-            templates_path in written_strs
-        ), f"Expected templates/map/scripts/{sample} in written paths"
-        assert (
-            map_path in written_strs
-        ), f"Expected .map/scripts/{sample} in written paths (map/ -> .map/ remap)"
+        assert templates_path in written_strs, (
+            f"Expected templates/map/scripts/{sample} in written paths"
+        )
+        assert map_path in written_strs, (
+            f"Expected .map/scripts/{sample} in written paths (map/ -> .map/ remap)"
+        )
 
     @_skip_no_templates_src
     def test_vc1_hooks_last_across_both_dest_trees(self) -> None:
@@ -978,9 +979,9 @@ class TestRenderRepoTreesCodex:
             templates_src_root=_TEMPLATES_SRC,
         )
         for committed, original in before.items():
-            assert (
-                committed.read_bytes() == original
-            ), f"Byte-parity FAILED for templates/codex/{committed.relative_to(_TEMPLATES_CODEX)}"
+            assert committed.read_bytes() == original, (
+                f"Byte-parity FAILED for templates/codex/{committed.relative_to(_TEMPLATES_CODEX)}"
+            )
 
     @_skip_no_codex_templates_src
     def test_vc1_codex_dev_byte_identity(self) -> None:
@@ -996,12 +997,12 @@ class TestRenderRepoTreesCodex:
                 continue
             rel = committed.relative_to(_CODEX_ROOT)
             template_copy = _TEMPLATES_CODEX / rel
-            assert (
-                template_copy.exists()
-            ), f"templates/codex/{rel} missing — codex render did not produce it"
-            assert filecmp.cmp(
-                committed, template_copy, shallow=False
-            ), f"Byte-parity FAILED: .codex/{rel} vs templates/codex/{rel}"
+            assert template_copy.exists(), (
+                f"templates/codex/{rel} missing — codex render did not produce it"
+            )
+            assert filecmp.cmp(committed, template_copy, shallow=False), (
+                f"Byte-parity FAILED: .codex/{rel} vs templates/codex/{rel}"
+            )
 
     @_skip_no_codex_templates_src
     def test_vc1_agents_skills_byte_identity(self) -> None:
@@ -1017,12 +1018,12 @@ class TestRenderRepoTreesCodex:
                 continue
             rel = committed.relative_to(_AGENTS_SKILLS_ROOT)
             template_copy = _TEMPLATES_CODEX / "skills" / rel
-            assert (
-                template_copy.exists()
-            ), f"templates/codex/skills/{rel} missing — codex render did not produce it"
-            assert filecmp.cmp(
-                committed, template_copy, shallow=False
-            ), f"Byte-parity FAILED: .agents/skills/{rel} vs templates/codex/skills/{rel}"
+            assert template_copy.exists(), (
+                f"templates/codex/skills/{rel} missing — codex render did not produce it"
+            )
+            assert filecmp.cmp(committed, template_copy, shallow=False), (
+                f"Byte-parity FAILED: .agents/skills/{rel} vs templates/codex/skills/{rel}"
+            )
 
     @_skip_no_codex_templates_src
     def test_vc1_skills_remap_to_agents_skills(self) -> None:
@@ -1040,12 +1041,12 @@ class TestRenderRepoTreesCodex:
         templates_path = str(_TEMPLATES_CODEX / "skills" / sample_rel)
         agents_path = str(_AGENTS_SKILLS_ROOT / sample_rel)
 
-        assert (
-            templates_path in written_strs
-        ), f"Expected templates/codex/skills/{sample_rel} in written paths"
-        assert (
-            agents_path in written_strs
-        ), f"Expected .agents/skills/{sample_rel} in written paths (skills remap)"
+        assert templates_path in written_strs, (
+            f"Expected templates/codex/skills/{sample_rel} in written paths"
+        )
+        assert agents_path in written_strs, (
+            f"Expected .agents/skills/{sample_rel} in written paths (skills remap)"
+        )
 
     @_skip_no_codex_templates_src
     def test_vc1_non_skills_remap_to_codex_dev(self) -> None:
@@ -1063,28 +1064,36 @@ class TestRenderRepoTreesCodex:
         templates_path = str(_TEMPLATES_CODEX / sample_rel)
         codex_dev_path = str(_CODEX_ROOT / sample_rel)
 
-        assert (
-            templates_path in written_strs
-        ), f"Expected templates/codex/{sample_rel} in written paths"
-        assert (
-            codex_dev_path in written_strs
-        ), f"Expected .codex/{sample_rel} in written paths (.codex remap)"
+        assert templates_path in written_strs, (
+            f"Expected templates/codex/{sample_rel} in written paths"
+        )
+        assert codex_dev_path in written_strs, (
+            f"Expected .codex/{sample_rel} in written paths (.codex remap)"
+        )
 
     @_skip_no_codex_templates_src
-    def test_vc3_four_workflow_gate_copies_byte_identical(self) -> None:
-        """All 4 workflow-gate.py copies must be byte-identical (VC3)."""
-        copies = [
-            _REPO_ROOT / ".claude" / "hooks" / "workflow-gate.py",
-            _REPO_ROOT / ".codex" / "hooks" / "workflow-gate.py",
-            _TEMPLATES_DEST / "hooks" / "workflow-gate.py",
-            _TEMPLATES_CODEX / "hooks" / "workflow-gate.py",
+    def test_vc3_provider_workflow_gate_copies_byte_identical(self) -> None:
+        """Each provider's source render and installed copy stay identical (VC3)."""
+        provider_pairs = [
+            (
+                _REPO_ROOT / ".claude" / "hooks" / "workflow-gate.py",
+                _TEMPLATES_DEST / "hooks" / "workflow-gate.py",
+            ),
+            (
+                _REPO_ROOT / ".codex" / "hooks" / "workflow-gate.py",
+                _TEMPLATES_CODEX / "hooks" / "workflow-gate.py",
+            ),
         ]
-        canonical = copies[0]
-        for other in copies[1:]:
-            assert other.exists(), f"workflow-gate.py missing at: {other}"
-            assert filecmp.cmp(
-                canonical, other, shallow=False
-            ), f"workflow-gate.py DIFFERS: {canonical} vs {other}"
+        for dev_copy, shipped_copy in provider_pairs:
+            assert dev_copy.exists(), f"workflow-gate.py missing at: {dev_copy}"
+            assert shipped_copy.exists(), f"workflow-gate.py missing at: {shipped_copy}"
+            assert filecmp.cmp(dev_copy, shipped_copy, shallow=False), (
+                f"workflow-gate.py DIFFERS: {dev_copy} vs {shipped_copy}"
+            )
+
+        codex_gate = provider_pairs[1][0].read_text(encoding="utf-8")
+        assert '"apply_patch"' in codex_gate
+        assert "def is_read_only_bash" in codex_gate
 
     @_skip_no_codex_templates_src
     def test_vc3_workflow_gate_no_recursion_guard(self) -> None:
@@ -1093,9 +1102,9 @@ class TestRenderRepoTreesCodex:
         text = wg.read_text(encoding="utf-8")
         forbidden = ["_RECURSION_GUARD", "already_running"]
         for marker in forbidden:
-            assert (
-                marker not in text
-            ), f"Forbidden recursion-guard marker {marker!r} found in workflow-gate.py"
+            assert marker not in text, (
+                f"Forbidden recursion-guard marker {marker!r} found in workflow-gate.py"
+            )
 
     @_skip_no_codex_templates_src
     def test_vc4_stray_delimiters_zero_codex(self, tmp_path: Path) -> None:
@@ -1120,9 +1129,9 @@ class TestRenderRepoTreesCodex:
                 assert_no_stray_delimiters(text)
             except ValueError as exc:
                 errors.append(f"codex/{rel}: {exc}")
-        assert (
-            not errors
-        ), "Stray delimiter hits in rendered codex files:\n" + "\n".join(errors)
+        assert not errors, (
+            "Stray delimiter hits in rendered codex files:\n" + "\n".join(errors)
+        )
 
     @_skip_no_codex_templates_src
     def test_hooks_last_codex_and_templates_codex(self) -> None:
@@ -1191,9 +1200,9 @@ class TestGoldenFixturesClaude:
             dest_root=dest,
         )
         rendered_file = dest / "references" / "escalation-matrix.md"
-        assert (
-            rendered_file.exists()
-        ), "Renderer did not produce references/escalation-matrix.md"
+        assert rendered_file.exists(), (
+            "Renderer did not produce references/escalation-matrix.md"
+        )
         rendered_bytes = rendered_file.read_bytes()
         golden_bytes = golden.read_bytes()
         assert rendered_bytes == golden_bytes, (
@@ -1260,9 +1269,9 @@ class TestGoldenFixturesCodex:
             dest_root=dest,
         )
         rendered_file = dest / "config.toml"
-        assert (
-            rendered_file.exists()
-        ), "Renderer did not produce config.toml from codex subtree"
+        assert rendered_file.exists(), (
+            "Renderer did not produce config.toml from codex subtree"
+        )
         rendered_bytes = rendered_file.read_bytes()
         golden_bytes = golden.read_bytes()
         assert rendered_bytes == golden_bytes, (
@@ -1272,6 +1281,46 @@ class TestGoldenFixturesCodex:
             f"  Golden repr  (first 200): {golden_bytes[:200]!r}\n"
             f"  Rendered repr (first 200): {rendered_bytes[:200]!r}"
         )
+
+    @_skip_no_codex_templates_src
+    def test_codex_renders_all_nine_agent_roles_with_sandbox_intent(
+        self, tmp_path: Path
+    ) -> None:
+        dest = tmp_path / "rendered"
+        render_tree(
+            "codex",
+            templates_src_root=_TEMPLATES_SRC_CODEX,
+            template_loader_root=_TEMPLATES_SRC,
+            dest_root=dest,
+        )
+        expected = {
+            "actor",
+            "documentation-reviewer",
+            "evaluator",
+            "final-verifier",
+            "monitor",
+            "predictor",
+            "reflector",
+            "researcher",
+            "decomposer",
+        }
+        role_files = list((dest / "agents").glob("*.toml"))
+        roles = {path.stem for path in role_files}
+        assert roles == expected
+        for path in role_files:
+            data = tomllib.loads(path.read_text(encoding="utf-8"))
+            assert data["name"] == path.stem
+            assert data["description"]
+            assert data["developer_instructions"]
+            expected_mode = "workspace-write" if path.stem == "actor" else "read-only"
+            assert data["sandbox_mode"] == expected_mode
+            if path.stem != "actor":
+                instructions = data["developer_instructions"].lower()
+                assert "write the findings file" not in instructions
+                assert "write is permitted" not in instructions
+
+        config = tomllib.loads((dest / "config.toml").read_text(encoding="utf-8"))
+        assert config["agents"] == {"max_threads": 6, "max_depth": 2}
 
     @_skip_no_codex_templates_src
     def test_vc3_negative_mutated_fixture_fails(self, tmp_path: Path) -> None:
@@ -1322,9 +1371,9 @@ class TestDiffRenderedTrees:
             stale = diff_rendered_trees(
                 provider, repo_root=_REPO_ROOT, templates_src_root=_TEMPLATES_SRC
             )
-            assert (
-                stale == []
-            ), f"Stale generated files for provider {provider!r}: {stale}"
+            assert stale == [], (
+                f"Stale generated files for provider {provider!r}: {stale}"
+            )
 
     @_skip_no_templates_src
     def test_modified_gated_file_is_flagged(self, tmp_path: Path) -> None:
@@ -1357,6 +1406,19 @@ class TestDiffRenderedTrees:
             "claude", repo_root=real, templates_src_root=_TEMPLATES_SRC
         )
         assert target in stale, f"Expected missing {target} flagged; got {stale}"
+
+    @_skip_no_templates_src
+    def test_modified_codex_reference_is_flagged(self, tmp_path: Path) -> None:
+        """Codex shared references are part of the generated-tree gate."""
+        real = tmp_path / "repo"
+        render_repo_trees("codex", repo_root=real, templates_src_root=_TEMPLATES_SRC)
+        target = real / ".agents/references/map-output-examples.md"
+        assert target.is_file()
+        target.write_text("STALE\n", encoding="utf-8")
+        stale = diff_rendered_trees(
+            "codex", repo_root=real, templates_src_root=_TEMPLATES_SRC
+        )
+        assert target in stale
 
     @_skip_no_templates_src
     def test_unmanaged_learned_file_not_gated_and_not_mutated(
@@ -1425,9 +1487,9 @@ class TestRequirementsIndexGoldenRender:
         """VC2: committed .claude/skills/map-plan/plan-reference.md contains
         the opening Requirements Index sentinel (ST-001 render landed).
         """
-        assert (
-            _MAP_PLAN_PLAN_REFERENCE_CLAUDE.is_file()
-        ), f"Generated plan-reference.md missing: {_MAP_PLAN_PLAN_REFERENCE_CLAUDE}"
+        assert _MAP_PLAN_PLAN_REFERENCE_CLAUDE.is_file(), (
+            f"Generated plan-reference.md missing: {_MAP_PLAN_PLAN_REFERENCE_CLAUDE}"
+        )
         content = _MAP_PLAN_PLAN_REFERENCE_CLAUDE.read_text(encoding="utf-8")
         assert _RI_OPEN_SENTINEL in content, (
             f"plan-reference.md missing opening sentinel {_RI_OPEN_SENTINEL!r} — "
@@ -1436,21 +1498,21 @@ class TestRequirementsIndexGoldenRender:
 
     def test_vc2_plan_reference_committed_contains_sentinel_close(self) -> None:
         """VC2: committed plan-reference.md contains the closing sentinel."""
-        assert (
-            _MAP_PLAN_PLAN_REFERENCE_CLAUDE.is_file()
-        ), f"Generated plan-reference.md missing: {_MAP_PLAN_PLAN_REFERENCE_CLAUDE}"
+        assert _MAP_PLAN_PLAN_REFERENCE_CLAUDE.is_file(), (
+            f"Generated plan-reference.md missing: {_MAP_PLAN_PLAN_REFERENCE_CLAUDE}"
+        )
         content = _MAP_PLAN_PLAN_REFERENCE_CLAUDE.read_text(encoding="utf-8")
-        assert (
-            _RI_CLOSE_SENTINEL in content
-        ), f"plan-reference.md missing closing sentinel {_RI_CLOSE_SENTINEL!r}"
+        assert _RI_CLOSE_SENTINEL in content, (
+            f"plan-reference.md missing closing sentinel {_RI_CLOSE_SENTINEL!r}"
+        )
 
     def test_vc2_skill_committed_contains_requirements_index_instruction(self) -> None:
         """VC2: committed .claude/skills/map-plan/SKILL.md contains the
         'Requirements Index (MANDATORY)' author instruction (ST-002 render landed).
         """
-        assert (
-            _MAP_PLAN_SKILL_CLAUDE.is_file()
-        ), f"Generated SKILL.md missing: {_MAP_PLAN_SKILL_CLAUDE}"
+        assert _MAP_PLAN_SKILL_CLAUDE.is_file(), (
+            f"Generated SKILL.md missing: {_MAP_PLAN_SKILL_CLAUDE}"
+        )
         content = _MAP_PLAN_SKILL_CLAUDE.read_text(encoding="utf-8")
         assert _RI_SKILL_INSTRUCTION in content, (
             f"SKILL.md missing instruction {_RI_SKILL_INSTRUCTION!r} — "
@@ -1461,9 +1523,9 @@ class TestRequirementsIndexGoldenRender:
         """VC2: committed templates/skills/map-plan/plan-reference.md contains
         the sentinel pair (cross-tree parity for the spec template).
         """
-        assert (
-            _MAP_PLAN_PLAN_REFERENCE_TEMPLATES.is_file()
-        ), f"Generated plan-reference.md missing in templates/: {_MAP_PLAN_PLAN_REFERENCE_TEMPLATES}"
+        assert _MAP_PLAN_PLAN_REFERENCE_TEMPLATES.is_file(), (
+            f"Generated plan-reference.md missing in templates/: {_MAP_PLAN_PLAN_REFERENCE_TEMPLATES}"
+        )
         content = _MAP_PLAN_PLAN_REFERENCE_TEMPLATES.read_text(encoding="utf-8")
         assert _RI_OPEN_SENTINEL in content
         assert _RI_CLOSE_SENTINEL in content
@@ -1472,9 +1534,9 @@ class TestRequirementsIndexGoldenRender:
         """VC2: committed templates/skills/map-plan/SKILL.md contains
         the Requirements Index author instruction.
         """
-        assert (
-            _MAP_PLAN_SKILL_TEMPLATES.is_file()
-        ), f"Generated SKILL.md missing in templates/: {_MAP_PLAN_SKILL_TEMPLATES}"
+        assert _MAP_PLAN_SKILL_TEMPLATES.is_file(), (
+            f"Generated SKILL.md missing in templates/: {_MAP_PLAN_SKILL_TEMPLATES}"
+        )
         content = _MAP_PLAN_SKILL_TEMPLATES.read_text(encoding="utf-8")
         assert _RI_SKILL_INSTRUCTION in content
 
@@ -1488,10 +1550,7 @@ class TestRequirementsIndexGoldenRender:
             _MAP_PLAN_PLAN_REFERENCE_CLAUDE,
             _MAP_PLAN_PLAN_REFERENCE_TEMPLATES,
             shallow=False,
-        ), (
-            "cross-tree parity FAILED for plan-reference.md — "
-            "run make render-templates"
-        )
+        ), "cross-tree parity FAILED for plan-reference.md — run make render-templates"
 
     def test_vc2_cross_tree_skill_byte_identity(self) -> None:
         """VC2: .claude/ and templates/ copies of map-plan/SKILL.md are byte-identical."""
@@ -1501,10 +1560,7 @@ class TestRequirementsIndexGoldenRender:
             _MAP_PLAN_SKILL_CLAUDE,
             _MAP_PLAN_SKILL_TEMPLATES,
             shallow=False,
-        ), (
-            "cross-tree parity FAILED for map-plan/SKILL.md — "
-            "run make render-templates"
-        )
+        ), "cross-tree parity FAILED for map-plan/SKILL.md — run make render-templates"
 
     @_skip_no_templates_src
     def test_vc2_fresh_render_plan_reference_byte_identity(

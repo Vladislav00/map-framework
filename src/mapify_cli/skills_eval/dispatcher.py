@@ -1,9 +1,11 @@
 """Variant dispatcher for the skills_eval package.
 
-Provides the ABC ``VariantDispatcher`` and two concrete implementations:
+Provides the ABC ``VariantDispatcher`` and provider implementations:
 - ``MockDispatcher``: zero-subprocess, caller-controlled output for CI tests (INV-2).
 - ``ClaudeSubprocessDispatcher``: real ``claude -p`` invocation in a seeded
   throwaway temp cwd with the TEMP-FLIP applied.
+- ``CodexSubprocessDispatcher``: real ``codex exec --json`` invocation in a
+  throwaway project seeded with ``.agents/`` and ``.codex/``.
 
 Hard constraints (INV-2, INV-3, INV-5)
 ---------------------------------------
@@ -258,9 +260,7 @@ def _derive_triggered_skill(session_id: str, cwd: Path) -> str | None:
 
     transcript_path = _locate_transcript(session_id, cwd)
     if transcript_path is None or not transcript_path.exists():
-        logger.debug(
-            "transcript not found for session_id=%s cwd=%s", session_id, cwd
-        )
+        logger.debug("transcript not found for session_id=%s cwd=%s", session_id, cwd)
         return None
 
     return _parse_transcript_for_skill(transcript_path)
@@ -530,7 +530,9 @@ class ClaudeSubprocessDispatcher(VariantDispatcher):
             ``backoff_base * 2**1 + jitter``, etc.
         """
         self._source_claude_dir: Path = (
-            source_claude_dir if source_claude_dir is not None else Path.cwd() / ".claude"
+            source_claude_dir
+            if source_claude_dir is not None
+            else Path.cwd() / ".claude"
         )
         self._timeout = timeout
         self._max_retries = max_retries
@@ -750,3 +752,181 @@ class ClaudeSubprocessDispatcher(VariantDispatcher):
             duration_s=duration_s,
             error=None,
         )
+
+
+_CODEX_SKILL_MARKER_RE = re.compile(
+    r"<map-skill-eval-triggered\s+name=[\"']([^\"']+)[\"']\s*/>"
+)
+
+
+def _instrument_codex_skills(agents_dir: Path) -> None:
+    """Add an eval-only activation marker to every seeded Codex skill.
+
+    ``codex exec --json`` does not emit a skill-activation event.  Instrumenting
+    only the temporary copies gives the evaluator observable evidence without
+    changing skill descriptions (and therefore without changing selection).
+    """
+    skills_dir = agents_dir / "skills"
+    if not skills_dir.is_dir():
+        return
+    for skill_file in skills_dir.glob("*/SKILL.md"):
+        skill_name = skill_file.parent.name
+        source = skill_file.read_text(encoding="utf-8")
+        if not source.startswith("---\n"):
+            raise ValueError(f"Codex skill lacks YAML frontmatter: {skill_file}")
+        frontmatter_end = source.find("\n---\n", 4)
+        if frontmatter_end < 0:
+            raise ValueError(f"Codex skill has unterminated frontmatter: {skill_file}")
+        frontmatter = source[: frontmatter_end + len("\n---\n")]
+        marker_instruction = (
+            "\n# MAP skill-eval probe\n\n"
+            "Return exactly this marker immediately. Do not perform any other "
+            "skill workflow or call tools:\n\n"
+            f'<map-skill-eval-triggered name="{skill_name}" />\n'
+        )
+        skill_file.write_text(
+            frontmatter + marker_instruction,
+            encoding="utf-8",
+        )
+
+
+def _parse_codex_jsonl(stdout: str) -> tuple[str, TokenUsage | None, str | None]:
+    """Parse documented Codex exec events and the eval-only response marker."""
+    raw_output = ""
+    token_usage: TokenUsage | None = None
+    triggered_skill: str | None = None
+    for raw_line in stdout.splitlines():
+        try:
+            event = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "item.completed":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str):
+                    raw_output = text
+                    marker = _CODEX_SKILL_MARKER_RE.search(text)
+                    if marker is not None:
+                        triggered_skill = marker.group(1).removeprefix("$")
+                        raw_output = _CODEX_SKILL_MARKER_RE.sub("", text).rstrip()
+        elif event.get("type") == "turn.completed":
+            usage = event.get("usage")
+            if isinstance(usage, dict):
+                total_input = int(usage.get("input_tokens", 0) or 0)
+                cached_input = int(usage.get("cached_input_tokens", 0) or 0)
+                token_usage = TokenUsage(
+                    input_tokens=max(0, total_input - cached_input),
+                    cache_read_input_tokens=max(0, cached_input),
+                    cache_creation_input_tokens=0,
+                )
+    return raw_output, token_usage, triggered_skill
+
+
+class CodexSubprocessDispatcher(VariantDispatcher):
+    """Run trigger evaluation through ``codex exec --json`` in isolation."""
+
+    def __init__(
+        self,
+        *,
+        source_agents_dir: Path | None = None,
+        source_codex_dir: Path | None = None,
+        timeout: float = 90.0,
+        max_retries: int = 2,
+        backoff_base: float = 2.0,
+        model: str | None = None,
+    ) -> None:
+        self._source_agents_dir = source_agents_dir or Path.cwd() / ".agents"
+        self._source_codex_dir = source_codex_dir or Path.cwd() / ".codex"
+        self._timeout = timeout
+        self._max_retries = max_retries
+        self._backoff_base = backoff_base
+        self._model = model
+
+    def dispatch(self, prompt: str) -> DispatchResult:
+        started = time.monotonic()
+        tmp = Path(tempfile.mkdtemp(prefix="mapeval-codex-"))
+        try:
+            for source, name in (
+                (self._source_agents_dir, ".agents"),
+                (self._source_codex_dir, ".codex"),
+            ):
+                destination = tmp / name
+                if source.is_dir():
+                    shutil.copytree(source, destination)
+                else:
+                    destination.mkdir(parents=True)
+            _instrument_codex_skills(tmp / ".agents")
+            (tmp / ".map").mkdir()
+
+            argv = [
+                "codex",
+                "exec",
+                "--json",
+                "--sandbox",
+                "read-only",
+                "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--skip-git-repo-check",
+            ]
+            if self._model:
+                argv.extend(["--model", self._model])
+            argv.append("-")
+            last_error = ""
+            for attempt in range(self._max_retries + 1):
+                if attempt:
+                    time.sleep(
+                        self._backoff_base * (2 ** (attempt - 1))
+                        + random.uniform(0, _JITTER_MAX)
+                    )
+                try:
+                    proc = subprocess.run(
+                        argv,
+                        input=prompt,
+                        capture_output=True,
+                        text=True,
+                        timeout=self._timeout,
+                        cwd=tmp,
+                        env={**os.environ, "MAP_INVOKED_BY": "skills-eval"},
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    last_error = f"codex exec timed out after {self._timeout}s"
+                    continue
+                except OSError as exc:
+                    last_error = f"OSError: {exc}"
+                    continue
+                if proc.returncode != 0:
+                    last_error = (
+                        f"non-zero returncode {proc.returncode}: "
+                        f"{(proc.stderr or '')[:200].strip()}"
+                    )
+                    continue
+                output, usage, skill = _parse_codex_jsonl(proc.stdout or "")
+                return DispatchResult(
+                    raw_output=output,
+                    triggered_skill=skill,
+                    token_usage=usage,
+                    duration_s=time.monotonic() - started,
+                    error=None,
+                )
+            return DispatchResult(
+                raw_output="",
+                triggered_skill=None,
+                token_usage=None,
+                duration_s=time.monotonic() - started,
+                error=last_error or "codex dispatch failed after retries",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return DispatchResult(
+                raw_output="",
+                triggered_skill=None,
+                token_usage=None,
+                duration_s=time.monotonic() - started,
+                error=f"seeding error: {exc}",
+            )
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)

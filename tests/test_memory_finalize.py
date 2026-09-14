@@ -83,12 +83,14 @@ def _fake_completed_process(
 ) -> subprocess.CompletedProcess[str]:
     """Return a fake CompletedProcess mimicking claude -p --output-format json."""
     payload = {
-        "result": json.dumps({
-            "title": "Test session summary title",
-            "body": result_text,
-            "decisions": ["used flock"],
-            "findings": ["atomic write works"],
-        }),
+        "result": json.dumps(
+            {
+                "title": "Test session summary title",
+                "body": result_text,
+                "decisions": ["used flock"],
+                "findings": ["atomic write works"],
+            }
+        ),
         "usage": {
             "input_tokens": input_tokens,
             "cache_read_input_tokens": 0,
@@ -104,6 +106,49 @@ def _fake_completed_process(
     )
 
 
+def _fake_codex_completed_process(
+    result_text: str = "Codex session summary body",
+) -> subprocess.CompletedProcess[str]:
+    """Return a fake ``codex exec --json`` JSONL stream."""
+    message = json.dumps(
+        {
+            "title": "Codex session summary title",
+            "body": result_text,
+            "decisions": ["used codex"],
+            "findings": ["jsonl parsed"],
+        }
+    )
+    events = [
+        {"type": "thread.started", "thread_id": "thread-1"},
+        {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": message},
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 120,
+                "cached_input_tokens": 20,
+                "output_tokens": 40,
+            },
+        },
+    ]
+    return subprocess.CompletedProcess(
+        args=[
+            "codex",
+            "exec",
+            "--json",
+            "--sandbox",
+            "read-only",
+            "--ephemeral",
+            "-",
+        ],
+        returncode=0,
+        stdout="\n".join(json.dumps(event) for event in events) + "\n",
+        stderr="",
+    )
+
+
 # ---------------------------------------------------------------------------
 # VC1 — success path
 # ---------------------------------------------------------------------------
@@ -115,7 +160,10 @@ def test_vc1_success_digest_written(tmp_path: Path) -> None:
     scratch_dir = _scratch_dir(tmp_path)
     _write_scratch(scratch_dir, _SID)
 
-    with patch("mapify_cli.memory.finalize.subprocess.run", return_value=_fake_completed_process()):
+    with patch(
+        "mapify_cli.memory.finalize.subprocess.run",
+        return_value=_fake_completed_process(),
+    ):
         count = finalize_dirty(None, tmp_path)
 
     assert count == 1
@@ -153,7 +201,10 @@ def test_vc1_digest_content_has_frontmatter(tmp_path: Path) -> None:
     scratch_dir = _scratch_dir(tmp_path)
     _write_scratch(scratch_dir, _SID)
 
-    with patch("mapify_cli.memory.finalize.subprocess.run", return_value=_fake_completed_process()):
+    with patch(
+        "mapify_cli.memory.finalize.subprocess.run",
+        return_value=_fake_completed_process(),
+    ):
         finalize_dirty(None, tmp_path)
 
     sessions = _sessions_dir(tmp_path)
@@ -179,7 +230,10 @@ def test_vc2_no_session_end_still_finalizes(tmp_path: Path) -> None:
     _write_scratch(scratch_dir, _SID, turns=1)
     assert not (scratch_dir / f"{_SID}.finalized").exists()
 
-    with patch("mapify_cli.memory.finalize.subprocess.run", return_value=_fake_completed_process()):
+    with patch(
+        "mapify_cli.memory.finalize.subprocess.run",
+        return_value=_fake_completed_process(),
+    ):
         count = finalize_dirty(None, tmp_path)
 
     assert count == 1
@@ -252,12 +306,20 @@ def test_vc3_concurrent_finalized_inside_lock(tmp_path: Path) -> None:
     from mapify_cli._locking import LockState, StateWriter
 
     @contextlib.contextmanager  # type: ignore[misc]
-    def fake_flock(name: str, *, timeout_s: float = 10.0, initial_state: LockState = LockState.IN_PROGRESS) -> Any:
+    def fake_flock(
+        name: str,
+        *,
+        timeout_s: float = 10.0,
+        initial_state: LockState = LockState.IN_PROGRESS,
+    ) -> Any:
         del timeout_s, initial_state  # signature-compat only; unused in this stub
         # Simulate: concurrent process created .finalized just as we entered lock.
         (scratch_dir / f"{_SID}.finalized").touch()
         from pathlib import Path as _Path
-        writer = StateWriter(lock_root=_Path.home() / ".map" / "locks", name=name, pid=1)
+
+        writer = StateWriter(
+            lock_root=_Path.home() / ".map" / "locks", name=name, pid=1
+        )
         yield writer
 
     mock_run = MagicMock()
@@ -312,6 +374,128 @@ def test_vc4_subprocess_argv_env_timeout(tmp_path: Path) -> None:
     # timeout kwarg must be present and == 42.
     assert "timeout" in call_kwargs
     assert call_kwargs["timeout"] == 42
+
+
+def test_codex_provider_uses_exec_json_and_parses_digest(tmp_path: Path) -> None:
+    """Codex finalization uses its JSONL interface and writes structured data."""
+    _make_git(tmp_path)
+    scratch_dir = _scratch_dir(tmp_path)
+    _write_scratch(scratch_dir, _SID)
+
+    with patch(
+        "mapify_cli.memory.finalize.subprocess.run",
+        return_value=_fake_codex_completed_process(),
+    ) as mock_run:
+        count = finalize_dirty(None, tmp_path, timeout=42, provider="codex")
+
+    assert count == 1
+    argv = mock_run.call_args.args[0]
+    assert argv == [
+        "codex",
+        "exec",
+        "--json",
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "-",
+    ]
+    assert mock_run.call_args.kwargs["cwd"] == tmp_path
+    digest = next(_sessions_dir(tmp_path).glob("*.md")).read_text(encoding="utf-8")
+    assert "Codex session summary body" in digest
+    assert "used codex" in digest
+    cost = json.loads(
+        (_sessions_dir(tmp_path) / "memory-cost.log").read_text(encoding="utf-8")
+    )
+    assert cost["input_tokens"] == 100
+    assert cost["cache_read_input_tokens"] == 20
+    assert cost["input_tokens"] + cost["cache_read_input_tokens"] == 120
+    assert cost["output_tokens"] == 40
+
+
+def test_unknown_memory_provider_fails_loudly(tmp_path: Path) -> None:
+    """A typo must not silently select the Claude backend."""
+    with pytest.raises(ValueError, match="unsupported memory finalization provider"):
+        finalize_dirty(None, tmp_path, provider="unknown")
+
+
+def test_malformed_codex_output_keeps_scratch_for_retry(tmp_path: Path) -> None:
+    """Invalid Codex agent JSON must not commit a lossy digest."""
+    _make_git(tmp_path)
+    scratch_dir = _scratch_dir(tmp_path)
+    scratch = _write_scratch(scratch_dir, _SID)
+    event = {
+        "type": "item.completed",
+        "item": {"type": "agent_message", "text": "not json"},
+    }
+    proc = subprocess.CompletedProcess(
+        args=["codex"], returncode=0, stdout=json.dumps(event), stderr=""
+    )
+    with patch("mapify_cli.memory.finalize.subprocess.run", return_value=proc):
+        count = finalize_dirty(None, tmp_path, provider="codex")
+
+    assert count == 0
+    assert scratch.exists()
+    assert not (scratch_dir / f"{_SID}.finalized").exists()
+    assert list(_sessions_dir(tmp_path).glob("*.md")) == []
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "",
+        json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": json.dumps(
+                        {
+                            "title": 123,
+                            "body": "body",
+                            "decisions": [],
+                            "findings": [],
+                        }
+                    ),
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "type": "agent_message",
+                    "text": json.dumps(
+                        {
+                            "title": "title",
+                            "body": "body",
+                            "decisions": [{"secret": "not-a-string"}],
+                            "findings": [],
+                        }
+                    ),
+                },
+            }
+        ),
+    ],
+)
+def test_incomplete_codex_events_keep_scratch_for_retry(
+    tmp_path: Path, stdout: str
+) -> None:
+    """Empty, missing-message, and invalid-shape streams fail closed."""
+    _make_git(tmp_path)
+    scratch_dir = _scratch_dir(tmp_path)
+    scratch = _write_scratch(scratch_dir, _SID)
+    proc = subprocess.CompletedProcess(
+        args=["codex"], returncode=0, stdout=stdout, stderr=""
+    )
+    with patch("mapify_cli.memory.finalize.subprocess.run", return_value=proc):
+        count = finalize_dirty(None, tmp_path, provider="codex")
+
+    assert count == 0
+    assert scratch.exists()
+    assert not (scratch_dir / f"{_SID}.finalized").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -417,7 +601,9 @@ def test_marker_touch_failure_after_replace_leaves_unfinalized_then_retry_conver
     assert count2 == 1
     assert (scratch_dir / f"{_SID}.finalized").exists()
     assert not jsonl.exists()  # scratch deleted on successful finalize
-    assert len(list(sessions.glob("*.md"))) == 1  # still exactly one digest (idempotent)
+    assert (
+        len(list(sessions.glob("*.md"))) == 1
+    )  # still exactly one digest (idempotent)
 
 
 # ---------------------------------------------------------------------------
@@ -430,14 +616,16 @@ def test_vc5_truncated_trailing_line_is_ignored(tmp_path: Path) -> None:
     _make_git(tmp_path)
     scratch_dir = _scratch_dir(tmp_path)
 
-    valid_turn = json.dumps({
-        "ts": "2026-06-02T10:00:00+00:00",
-        "turn": 1,
-        "session_id": _SID,
-        "files_touched": ["src/foo.py"],
-        "prompt_ref": "ST-003",
-        "event": "turn",
-    })
+    valid_turn = json.dumps(
+        {
+            "ts": "2026-06-02T10:00:00+00:00",
+            "turn": 1,
+            "session_id": _SID,
+            "files_touched": ["src/foo.py"],
+            "prompt_ref": "ST-003",
+            "event": "turn",
+        }
+    )
     # Truncated: missing closing brace.
     truncated_line = '{"event": "turn"'
 
@@ -446,7 +634,10 @@ def test_vc5_truncated_trailing_line_is_ignored(tmp_path: Path) -> None:
         valid_turn + "\n" + truncated_line + "\n", encoding="utf-8"
     )
 
-    with patch("mapify_cli.memory.finalize.subprocess.run", return_value=_fake_completed_process()):
+    with patch(
+        "mapify_cli.memory.finalize.subprocess.run",
+        return_value=_fake_completed_process(),
+    ):
         count = finalize_dirty(None, tmp_path)
 
     # Should succeed using only the valid turn.
@@ -468,11 +659,13 @@ def test_vc6_empty_scratch_no_digest_but_finalized(tmp_path: Path) -> None:
     scratch_dir.mkdir(parents=True, exist_ok=True)
 
     # Write only an 'ended' marker — no turn records.
-    ended_record = json.dumps({
-        "event": "ended",
-        "ts": "2026-06-02T10:00:00+00:00",
-        "session_id": _SID,
-    })
+    ended_record = json.dumps(
+        {
+            "event": "ended",
+            "ts": "2026-06-02T10:00:00+00:00",
+            "session_id": _SID,
+        }
+    )
     jsonl = scratch_dir / f"{_SID}.jsonl"
     jsonl.write_text(ended_record + "\n", encoding="utf-8")
 
@@ -566,7 +759,10 @@ def test_incoming_sid_excluded_but_other_finalized(tmp_path: Path) -> None:
     _write_scratch(scratch_dir, _SID)
     incoming_jsonl = _write_scratch(scratch_dir, _INCOMING_SID)
 
-    with patch("mapify_cli.memory.finalize.subprocess.run", return_value=_fake_completed_process()):
+    with patch(
+        "mapify_cli.memory.finalize.subprocess.run",
+        return_value=_fake_completed_process(),
+    ):
         count = finalize_dirty(_INCOMING_SID, tmp_path)
 
     assert count == 1
@@ -630,7 +826,10 @@ def test_multiple_candidates_all_finalized(tmp_path: Path) -> None:
     for sid in sids:
         _write_scratch(scratch_dir, sid)
 
-    with patch("mapify_cli.memory.finalize.subprocess.run", return_value=_fake_completed_process()):
+    with patch(
+        "mapify_cli.memory.finalize.subprocess.run",
+        return_value=_fake_completed_process(),
+    ):
         count = finalize_dirty(None, tmp_path)
 
     assert count == 3

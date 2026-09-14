@@ -23,11 +23,9 @@ ENFORCEMENT:
 CONSTRAINTS (from step_state.json):
   - scope_glob: restrict edits to matching file patterns
 
-KNOWN LIMITATION (#164): this gate intercepts Edit/Write/MultiEdit only.
-File writes performed via Bash (``cat >``, ``tee``, ``sed -i``) are NOT
-gated. Closing that bypass requires parsing shell write-targets and is
-deferred to avoid false positives that would block legitimate Bash in the
-many repos this hook ships into.
+Common Bash file writes (redirection, ``tee``, and in-place mutation commands)
+are normalized to target paths and pass through the same phase gate. Read-only
+Bash commands remain outside the edit gate.
 
 Exit code 0 always (fail-open on errors).
 """
@@ -82,12 +80,62 @@ if sys.version_info < (3, 11):  # noqa: UP036
 import json
 import os
 import re
+import shlex
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-EDITING_TOOLS = {"Edit", "Write", "MultiEdit"}
+EDITING_TOOLS = {"Edit", "Write", "MultiEdit", "apply_patch", "Bash"}
 PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())).resolve()
+READ_ONLY_SHELL_COMMANDS = frozenset(
+    {
+        "basename",
+        "cat",
+        "cd",
+        "cmp",
+        "cut",
+        "diff",
+        "dirname",
+        "echo",
+        "false",
+        "fd",
+        "file",
+        "find",
+        "grep",
+        "head",
+        "jq",
+        "ls",
+        "pwd",
+        "printf",
+        "readlink",
+        "realpath",
+        "rg",
+        "stat",
+        "tail",
+        "test",
+        "true",
+        "type",
+        "uniq",
+        "wc",
+        "which",
+    }
+)
+READ_ONLY_GIT_SUBCOMMANDS = frozenset(
+    {
+        "blame",
+        "cat-file",
+        "diff",
+        "grep",
+        "log",
+        "ls-files",
+        "ls-tree",
+        "merge-base",
+        "rev-list",
+        "rev-parse",
+        "show",
+        "status",
+    }
+)
 
 # Phases where Edit/Write is expected (Actor applies code)
 EDITING_PHASES = {"ACTOR", "APPLY", "TEST_WRITER"}
@@ -181,7 +229,244 @@ def extract_target_file_paths(tool_call: dict) -> list[str]:
                 if isinstance(fp, str) and fp.strip():
                     paths.append(fp)
 
-    return paths
+    # Codex reports file edits canonically as apply_patch and places the patch
+    # text in tool_input.command. Parse only explicit patch headers; never infer
+    # paths from arbitrary added/removed content.
+    command = tool_input.get("command")
+    if tool_call.get("tool_name") == "apply_patch" and isinstance(command, str):
+        for match in re.finditer(
+            r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$", command, re.MULTILINE
+        ):
+            candidate = match.group(1).strip()
+            if candidate:
+                paths.append(candidate)
+        for match in re.finditer(r"^\*\*\* Move to:\s*(.+?)\s*$", command, re.MULTILINE):
+            candidate = match.group(1).strip()
+            if candidate:
+                paths.append(candidate)
+
+    if tool_call.get("tool_name") == "Bash" and isinstance(command, str):
+        # A punctuation-aware shell lexer preserves concatenated quoted and
+        # unquoted word fragments (`"src".py` -> `src.py`) while exposing
+        # redirect operators as tokens. Regex parsing cannot do both safely.
+        try:
+            lexer = shlex.shlex(
+                command, posix=True, punctuation_chars="><&|;"
+            )
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            redirect_tokens = list(lexer)
+        except ValueError:
+            redirect_tokens = []
+        file_redirects = {">", ">>", ">|", "&>", "<>"}
+        for index, token in enumerate(redirect_tokens[:-1]):
+            candidate = redirect_tokens[index + 1]
+            redirects_to_file = token in file_redirects and bool(candidate)
+            redirects_both_to_file = (
+                token == ">&" and candidate != "-" and not candidate.isdigit()
+            )
+            if redirects_to_file or redirects_both_to_file:
+                paths.append(candidate)
+
+        try:
+            tokens = shlex.split(command, comments=False, posix=True)
+        except ValueError:
+            tokens = []
+        separators = {"&&", "||", ";", "|"}
+        mutation_commands = {"touch", "mkdir", "rm", "unlink", "truncate"}
+        for index, token in enumerate(tokens):
+            base = Path(token).name
+            if base == "tee" or base in mutation_commands:
+                for candidate in tokens[index + 1 :]:
+                    if candidate in separators:
+                        break
+                    if not candidate.startswith("-"):
+                        paths.append(candidate)
+            elif base in {"cp", "mv", "install"}:
+                segment = []
+                for candidate in tokens[index + 1 :]:
+                    if candidate in separators:
+                        break
+                    if not candidate.startswith("-"):
+                        segment.append(candidate)
+                if segment:
+                    paths.append(segment[-1])
+            elif base in {"sed", "perl"} and any(
+                _is_in_place_option(option) for option in tokens[index + 1 :]
+            ):
+                segment = [
+                    candidate
+                    for candidate in tokens[index + 1 :]
+                    if candidate not in separators and not candidate.startswith("-")
+                ]
+                if segment:
+                    paths.append(segment[-1])
+            elif base == "dd":
+                for candidate in tokens[index + 1 :]:
+                    if candidate.startswith("of=") and candidate[3:]:
+                        paths.append(candidate[3:])
+            elif base in {"sort", "yq"}:
+                for position, candidate in enumerate(tokens[index + 1 :]):
+                    if candidate in {"-o", "--output"}:
+                        remaining = tokens[index + 2 + position :]
+                        if remaining:
+                            paths.append(remaining[0])
+                    elif candidate.startswith("--output="):
+                        paths.append(candidate.split("=", 1)[1])
+                if base == "yq" and "-i" in tokens[index + 1 :]:
+                    candidates = [
+                        candidate
+                        for candidate in tokens[index + 1 :]
+                        if not candidate.startswith("-")
+                    ]
+                    if candidates:
+                        paths.append(candidates[-1])
+            elif base == "git":
+                for position, candidate in enumerate(tokens[index + 1 :]):
+                    if candidate == "--output":
+                        remaining = tokens[index + 2 + position :]
+                        if remaining:
+                            paths.append(remaining[0])
+                    elif candidate.startswith("--output="):
+                        paths.append(candidate.split("=", 1)[1])
+
+    return list(dict.fromkeys(paths))
+
+
+def _is_in_place_option(option: str) -> bool:
+    """Return True for short and GNU long in-place mutation options."""
+    return option.startswith(("-i", "--in-place=")) or option == "--in-place"
+
+
+def _segment_has_explicit_write_target(raw_segment: str) -> bool:
+    """Return True when a mutating shell segment exposes its target to the gate."""
+    synthetic_call = {
+        "tool_name": "Bash",
+        "tool_input": {"command": raw_segment},
+    }
+    return bool(extract_target_file_paths(synthetic_call))
+
+
+def _segment_uses_known_writer(raw_segment: str) -> bool:
+    """Return True when target extraction understands the segment's writer."""
+    try:
+        tokens = shlex.split(raw_segment, comments=False, posix=True)
+    except ValueError:
+        return False
+    while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+        tokens.pop(0)
+    if not tokens:
+        return False
+    base = Path(tokens[0]).name
+    if base in {"tee", "touch", "mkdir", "rm", "unlink", "truncate", "cp", "mv", "install", "dd"}:
+        return True
+    if base in {"sed", "perl"}:
+        return any(_is_in_place_option(option) for option in tokens[1:])
+    if base in {"sort", "yq"}:
+        return any(
+            option in {"-i", "-o", "--output"}
+            or option.startswith("--output=")
+            for option in tokens[1:]
+        )
+    if base == "git":
+        return any(
+            option == "--output" or option.startswith("--output=")
+            for option in tokens[1:]
+        )
+    return False
+
+
+def has_unclassified_bash_writer(command: object) -> bool:
+    """Detect a writer hidden beside an unrelated, extractable shell target.
+
+    Target extraction is intentionally conservative. A compound command must
+    not become eligible for the orthogonal-path exception merely because one
+    segment exposes a harmless target while another opaque segment may write.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return False
+    for raw_segment in re.split(r"(?:&&|\|\||[;|])", command):
+        raw_segment = raw_segment.strip()
+        if not raw_segment or is_read_only_bash(raw_segment):
+            continue
+        if not _segment_has_explicit_write_target(
+            raw_segment
+        ) or not _segment_uses_known_writer(raw_segment):
+            return True
+    return False
+
+
+def is_read_only_bash(command: object) -> bool:
+    """Positively classify shell commands safe in a restricted MAP phase.
+
+    Unknown commands are deliberately not classified: when a workflow is in a
+    non-editing phase, the caller fails closed. This closes interpreter,
+    shell-eval, `patch`, and future mutation-tool bypasses without blocking them
+    during Actor or when no workflow state exists.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return True
+    if "$(" in command or "`" in command or "<(" in command or ">(" in command:
+        return False
+    for raw_segment in re.split(r"(?:&&|\|\||[;|])", command):
+        raw_segment = raw_segment.strip()
+        if not raw_segment:
+            continue
+        try:
+            tokens = shlex.split(raw_segment, comments=False, posix=True)
+        except ValueError:
+            return False
+        while tokens and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", tokens[0]):
+            tokens.pop(0)
+        if not tokens:
+            continue
+        base = Path(tokens[0]).name
+        if base in READ_ONLY_SHELL_COMMANDS:
+            if base == "find" and any(
+                token in {"-delete", "-exec", "-execdir", "-ok", "-okdir"}
+                for token in tokens[1:]
+            ):
+                return False
+            continue
+        if base == "sed" and not any(
+            _is_in_place_option(option) for option in tokens[1:]
+        ) and not any(re.search(r"(^|[; ])(?:e|w)(?:[; ]|$)", token) for token in tokens[1:]):
+            continue
+        if base in {"sort", "yq"} and not any(
+            option in {"-i", "-o", "--output"}
+            or option.startswith("--output=")
+            for option in tokens[1:]
+        ):
+            continue
+        if base == "git":
+            subcommand = next(
+                (token for token in tokens[1:] if not token.startswith("-")), ""
+            )
+            writes_output = any(
+                option == "--output" or option.startswith("--output=")
+                for option in tokens[1:]
+            )
+            if subcommand in READ_ONLY_GIT_SUBCOMMANDS and not writes_output:
+                continue
+        if base in {"python", "python3"} and len(tokens) > 1:
+            script = tokens[1]
+            if script.startswith(".map/scripts/") or "/.map/scripts/" in script:
+                continue
+        return False
+    return True
+
+
+def has_unresolved_shell_target(paths: list[str]) -> bool:
+    """Return True when Bash would expand a target after policy comparison."""
+    return any(
+        "$" in path
+        or "*" in path
+        or "?" in path
+        or "[" in path
+        or "{" in path
+        or path.startswith("~")
+        for path in paths
+    )
 
 
 def is_docs_only_path(file_path: str) -> bool:
@@ -714,8 +999,33 @@ def main() -> None:
         if tool_name not in EDITING_TOOLS:
             allow()
 
-        target_paths = extract_target_file_paths(tool_call)
         branch = get_branch_name()
+        target_paths = extract_target_file_paths(tool_call)
+        command = (tool_call.get("tool_input") or {}).get("command", "")
+        if tool_name == "Bash" and not target_paths:
+            if is_read_only_bash(command):
+                allow()
+            allowed, error = is_editing_phase(branch)
+            if not allowed:
+                deny(
+                    error
+                    or "Bash command blocked: not positively classified as read-only."
+                )
+            allow()
+        if tool_name == "Bash" and has_unclassified_bash_writer(command):
+            allowed, error = is_editing_phase(branch)
+            if not allowed:
+                deny(
+                    error
+                    or "Bash command blocked: a write-capable segment has no explicit target."
+                )
+        if tool_name == "Bash" and has_unresolved_shell_target(target_paths):
+            allowed, error = is_editing_phase(branch)
+            if not allowed:
+                deny(
+                    error
+                    or "Bash write target blocked: unresolved shell expansion."
+                )
 
         # State-tamper detector (D3): runner-owned MAP state
         # (step_state.json, approval_holds.json, auto-route.json,

@@ -785,7 +785,8 @@ def _paths_match_file(rule_paths: list[str], file_path: str) -> bool:
 def _extract_target_file(tool_name: str, tool_input: dict) -> str:
     """Extract the target file path from a tool invocation.
 
-    For Edit/Write/MultiEdit, reads ``file_path`` directly.
+    For Edit/Write/MultiEdit, reads ``file_path`` directly. For Codex
+    ``apply_patch``, returns the first explicit patch header path.
     For Bash, returns empty — we cannot reliably determine which files
     a command operates on without parsing arbitrary shell syntax.
     """
@@ -793,6 +794,16 @@ def _extract_target_file(tool_name: str, tool_input: dict) -> str:
         file_path = tool_input.get("file_path", "")
         if isinstance(file_path, str) and file_path.strip():
             return file_path.strip()
+    if tool_name == "apply_patch":
+        command = tool_input.get("command", "")
+        if isinstance(command, str):
+            match = re.search(
+                r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$",
+                command,
+                re.MULTILINE,
+            )
+            if match:
+                return match.group(1).strip()
     return ""
 
 
@@ -938,7 +949,7 @@ def main() -> None:
     command = ""
     conflict_context = ""
 
-    if tool_name in ("Edit", "Write", "MultiEdit"):
+    if tool_name in ("Edit", "Write", "MultiEdit", "apply_patch"):
         should_inject = True
     elif tool_name == "Bash":
         command_value = tool_input.get("command", "")
@@ -996,7 +1007,7 @@ def main() -> None:
     # already doing exactly that — consecutive atomic Edits in the same
     # ACTOR turn shouldn't be lectured.
     if (
-        tool_name in ("Edit", "Write", "MultiEdit")
+        tool_name in ("Edit", "Write", "MultiEdit", "apply_patch")
         and isinstance(state, dict)
         and state.get("current_step_phase") in ("ACTOR", "TEST_WRITER")
     ):
@@ -1009,7 +1020,7 @@ def main() -> None:
     # silent — a verification run needs no completion nag.
     if (
         reminder is None
-        and tool_name in ("Edit", "Write", "MultiEdit")
+        and tool_name in ("Edit", "Write", "MultiEdit", "apply_patch")
         and _state_is_terminal(state)
     ):
         reminder = _TERMINAL_NOTICE

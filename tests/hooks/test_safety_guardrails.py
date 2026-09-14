@@ -45,6 +45,19 @@ def run_hook_bash(command: str) -> tuple[int, str, str]:
     return result.returncode, result.stdout, result.stderr
 
 
+def run_hook_apply_patch(command: str) -> tuple[int, str, str]:
+    """Execute the hook with a Codex apply_patch payload."""
+    input_data = {"tool_name": "apply_patch", "tool_input": {"command": command}}
+    result = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=json.dumps(input_data),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
 def run_hook_bash_in(command: str, project_dir: Path) -> tuple[int, str, str]:
     """Execute the hook with CLAUDE_PROJECT_DIR pointed at *project_dir*.
 
@@ -188,20 +201,38 @@ class TestPrivateKeys:
 
 
 class TestSafePathPrefixes:
-    """Test that files in known safe directories are allowed even if name matches."""
+    """Safe directories remain allowlisted without masking sensitive names."""
 
     @pytest.mark.parametrize(
         "path",
         [
-            "src/config/secrets.yaml",
-            "tests/fixtures/credentials.json",
             ".claude/hooks/safety-guardrails.py",
+            "src/config/settings.yaml",
+            "tests/fixtures/example.json",
         ],
     )
     def test_safe_prefix_allowed(self, path):
         exit_code, stdout, _ = run_hook_file("Read", path)
         assert exit_code == 0
         assert _parse_stdout(stdout) == {}
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/.env",
+            "tests/fixtures/credentials.json",
+            "src/config/private-key.pem",
+        ],
+    )
+    def test_nested_sensitive_name_overrides_safe_prefix(self, path):
+        patch = (
+            "*** Begin Patch\n"
+            f"*** Update File: {path}\n"
+            "*** End Patch\n"
+        )
+        exit_code, stdout, _ = run_hook_apply_patch(patch)
+        assert exit_code == 0
+        _assert_denied(_parse_stdout(stdout))
 
 
 # =============================================================================

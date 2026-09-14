@@ -1025,6 +1025,54 @@ def _extract_turn_usage(entry: object) -> dict[str, object] | None:
     """
     if not isinstance(entry, dict):
         return None
+    if entry.get("type") == "event_msg":
+        payload = entry.get("payload")
+        if not isinstance(payload, dict) or payload.get("type") != "token_count":
+            return None
+        info = payload.get("info")
+        if not isinstance(info, dict):
+            return None
+        # Codex rollout token_count events expose both a cumulative session
+        # total and the latest turn. Recording the cumulative value at every
+        # Stop would multiply usage, so consume last_token_usage only.
+        usage = info.get("last_token_usage")
+        if not isinstance(usage, dict):
+            return None
+        total_input = _coerce_token_int(usage.get("input_tokens", 0))
+        cached_input = _coerce_token_int(usage.get("cached_input_tokens", 0))
+        msg_id = (
+            payload.get("turn_id")
+            or payload.get("id")
+            or entry.get("turn_id")
+            or entry.get("id")
+            or entry.get("timestamp")
+            or ""
+        )
+        return {
+            "input": max(0, total_input - cached_input),
+            "output": _coerce_token_int(usage.get("output_tokens", 0)),
+            "cache_creation": 0,
+            "cache_read": max(0, cached_input),
+            "model": str(payload.get("model") or info.get("model") or ""),
+            "msg_id": str(msg_id),
+            "provider": "codex",
+        }
+    if entry.get("type") == "turn.completed":
+        usage = entry.get("usage")
+        if not isinstance(usage, dict):
+            return None
+
+        total_input = _coerce_token_int(usage.get("input_tokens", 0))
+        cached_input = _coerce_token_int(usage.get("cached_input_tokens", 0))
+        return {
+            "input": max(0, total_input - cached_input),
+            "output": _coerce_token_int(usage.get("output_tokens", 0)),
+            "cache_creation": 0,
+            "cache_read": max(0, cached_input),
+            "model": str(entry.get("model") or ""),
+            "msg_id": str(entry.get("turn_id") or entry.get("id") or ""),
+            "provider": "codex",
+        }
     message = entry.get("message")
     if not isinstance(message, dict):
         return None
@@ -1134,7 +1182,9 @@ def _iter_new_usage(
 
     by_mid: dict[str, dict[str, object]] = {}
     order: list[str] = []
-    for raw in complete.decode("utf-8", errors="replace").splitlines():
+    for line_index, raw in enumerate(
+        complete.decode("utf-8", errors="replace").splitlines()
+    ):
         raw = raw.strip()
         if not raw:
             continue
@@ -1146,6 +1196,11 @@ def _iter_new_usage(
         if usage is None:
             continue
         mid = str(usage["msg_id"])
+        if not mid and usage.get("provider") == "codex":
+            # Codex turn.completed events may omit an id. The transcript byte
+            # window plus line index is stable across repeated hook sweeps.
+            mid = f"codex-offset-{offset + line_index}"
+            usage["msg_id"] = mid
         if not mid or mid in seen_ids:
             continue
         prev = by_mid.get(mid)

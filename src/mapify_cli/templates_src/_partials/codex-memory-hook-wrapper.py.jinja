@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Delegate Codex memory handling to the installed mapify runtime."""
+
+[% include "_partials/python-version-guard.py.jinja" %]
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())).resolve()
+ACTION = "<% memory_action %>"
+PROVIDER = "codex"
+
+
+def _silent() -> None:
+    sys.stdout.write("{}")
+
+
+def main() -> None:
+    if os.environ.get("MAP_INVOKED_BY"):
+        return
+    raw_event = sys.stdin.read()
+    try:
+        event = json.loads(raw_event)
+    except (json.JSONDecodeError, ValueError):
+        _silent()
+        return
+    if not isinstance(event, dict):
+        _silent()
+        return
+
+    executable = os.environ.get("MAPIFY_CLI") or shutil.which("mapify")
+    if not executable:
+        _silent()
+        return
+    timeout = {
+        "capture": 4,
+        "endmark": 2,
+        "finalize": 55,
+        "recall": 8,
+        "session": 55,
+    }[ACTION]
+    try:
+        proc = subprocess.run(
+            [
+                executable,
+                "_memory-hook",
+                ACTION,
+                "--project",
+                str(PROJECT_DIR),
+                "--provider",
+                PROVIDER,
+            ],
+            input=raw_event,
+            text=True,
+            capture_output=True,
+            cwd=PROJECT_DIR,
+            env=os.environ.copy(),
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        _silent()
+        return
+    output = proc.stdout.strip()
+    if proc.returncode != 0 or not output:
+        _silent()
+        return
+    try:
+        json.loads(output)
+    except json.JSONDecodeError:
+        _silent()
+        return
+    sys.stdout.write(output)
+
+
+if __name__ == "__main__":
+    main()

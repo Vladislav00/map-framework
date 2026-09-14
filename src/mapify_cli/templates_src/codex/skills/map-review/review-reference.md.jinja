@@ -1,4 +1,4 @@
-# /map-review Supporting Reference
+# $map-review Supporting Reference
 
 This file contains lower-frequency review details for the Codex
 `$map-review` port. Keep [SKILL.md](SKILL.md) focused on the active review
@@ -20,7 +20,7 @@ fi
 SIBLING_HINT=""
 if git log -1 --format=%B | grep -iE 'twin of |sibling |mirror of |port of ' >/dev/null; then
   REVIEW_MODE="sibling-aware"
-  SIBLING_HINT=$(git log -1 --format=%B | grep -oiE '(twin of|sibling|mirror of|port of)[^.]*' | head -1)
+  SIBLING_HINT=$(git log -1 --format=%B | grep -m1 -oiE '(twin of|sibling|mirror of|port of)[^.]*')
 fi
 REVIEW_MODE="$REVIEW_MODE" SIBLING_HINT="$SIBLING_HINT" BRANCH="$BRANCH" python3 -c '
 import json, os
@@ -49,28 +49,28 @@ Mode semantics:
 
 ```bash
 DETACHED_FLAG=false
-if echo "$ARGUMENTS" | grep -q -- '--detached'; then
+if printf '%s' "$ARGUMENTS" | grep -q -- '--detached'; then
   DETACHED_FLAG=true
-  ARGUMENTS=$(echo "$ARGUMENTS" | sed 's/--detached//g' | xargs)
+  ARGUMENTS=$(printf '%s' "$ARGUMENTS" | sed 's/--detached//g' | xargs)
 fi
 
 REVERSE_FLAG=false
-if echo "$ARGUMENTS" | grep -q -- '--reverse-sections'; then
+if printf '%s' "$ARGUMENTS" | grep -q -- '--reverse-sections'; then
   REVERSE_FLAG=true
 fi
 
 SHUFFLE_FLAG=false
-if echo "$ARGUMENTS" | grep -q -- '--shuffle-sections'; then
+if printf '%s' "$ARGUMENTS" | grep -q -- '--shuffle-sections'; then
   SHUFFLE_FLAG=true
 fi
 
 SEED_RAW=""
-if echo "$ARGUMENTS" | grep -qE -- '--seed[ =][0-9]+'; then
-  SEED_RAW=$(echo "$ARGUMENTS" | sed -nE 's/.*--seed[ =]([0-9]+).*/\1/p')
+if printf '%s' "$ARGUMENTS" | grep -qE -- '--seed[ =][0-9]+'; then
+  SEED_RAW=$(printf '%s' "$ARGUMENTS" | sed -nE 's/.*--seed[ =]([0-9]+).*/\1/p')
 fi
 
 COMPARE_FLAG=false
-if echo "$ARGUMENTS" | grep -q -- '--compare-orderings'; then
+if printf '%s' "$ARGUMENTS" | grep -q -- '--compare-orderings'; then
   COMPARE_FLAG=true
 fi
 
@@ -81,10 +81,10 @@ fi
 
 QUICK_FLAG=false
 SHOW_RAW_FLAG=false
-if echo "$ARGUMENTS" | grep -q -- '--quick'; then
+if printf '%s' "$ARGUMENTS" | grep -q -- '--quick'; then
   QUICK_FLAG=true
 fi
-if echo "$ARGUMENTS" | grep -q -- '--show-raw-findings'; then
+if printf '%s' "$ARGUMENTS" | grep -q -- '--show-raw-findings'; then
   SHOW_RAW_FLAG=true
 fi
 
@@ -112,30 +112,29 @@ MAINTAINER_PROMPT=$(printf '%s' "$REVIEW_PROMPTS_JSON" | python3 -c 'import json
 ```
 
 ```text
-spawn_agent(agent_type="monitor", message=MONITOR_PROMPT)
+spawn_agent(agent_type="monitor", task_name="review_monitor", message=MONITOR_PROMPT)
 # Full mode only — skip in lightweight mode (monitor-only):
-spawn_agent(agent_type="predictor", message=PREDICTOR_PROMPT)
+spawn_agent(agent_type="predictor", task_name="review_predictor", message=PREDICTOR_PROMPT)
 # Full mode only — skip in lightweight mode (monitor-only):
-spawn_agent(agent_type="evaluator", message=EVALUATOR_PROMPT)
+spawn_agent(agent_type="evaluator", task_name="review_evaluator", message=EVALUATOR_PROMPT)
 # Full mode only — role reviewers. Isolated means: no other reviewer's
 # output. They DO get read-only repo access on top of diff + bundle —
 # both roles must run `git show <default-branch>:<file>` and grep the base.
-spawn_agent(agent_type="evaluator", message=USER_EXPERIENCE_PROMPT)
-spawn_agent(agent_type="evaluator", message=MAINTAINER_PROMPT)
+spawn_agent(agent_type="predictor", task_name="review_user_experience", message=USER_EXPERIENCE_PROMPT)
+spawn_agent(agent_type="documentation-reviewer", task_name="review_maintainer", message=MAINTAINER_PROMPT)
 # When COMPLEXITY_LENS_ENABLED=true only:
-spawn_agent(agent_type="evaluator", message=COMPLEXITY_LENS_PROMPT)
+spawn_agent(agent_type="evaluator", task_name="review_complexity", message=COMPLEXITY_LENS_PROMPT)
 ```
 
 Full mode runs monitor + predictor + evaluator + both role reviewers;
-lightweight mode runs monitor only. The role reviewers reuse the
-`evaluator` agent type exactly as the complexity lens does — the
-configured Codex agents are decomposer/monitor/researcher/predictor/
-evaluator, and what a pass does is defined by its prompt, not by the type. Reviewer prompts reference `review-bundle.json`,
+lightweight mode runs monitor only. Role reviewers use the closest configured
+Codex roles: `predictor` for user impact and `documentation-reviewer` for
+maintainability and documentation consistency. Reviewer prompts reference `review-bundle.json`,
 `review-bundle.md`, the raw diff as secondary context, and the expected
 output schema (Monitor evidence/valid/verdict/issues,
 Predictor evidence/risk_assessment/landmine_evidence, Evaluator
 evidence/scores/monitor_severity_audit — same contract as Claude
-`/map-review`; see `AGENT_OUTPUT_SCHEMAS` in `map_step_runner.py` for the
+`$map-review`; see `AGENT_OUTPUT_SCHEMAS` in `map_step_runner.py` for the
 generated source of truth).
 
 ## Truncation Gate

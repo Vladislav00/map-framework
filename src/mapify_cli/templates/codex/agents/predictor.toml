@@ -1,5 +1,6 @@
 name = "predictor"
 description = "Predicts consequences and dependency impact of changes (MAP)"
+sandbox_mode = "read-only"
 
 developer_instructions = """
 # IDENTITY

@@ -18,8 +18,10 @@ from mapify_cli.skills_eval.aggregator import aggregate
 from mapify_cli.skills_eval.assertions import run_assertion
 from mapify_cli.skills_eval.dispatcher import (
     ClaudeSubprocessDispatcher,
+    CodexSubprocessDispatcher,
     MockDispatcher,
     VariantDispatcher,
+    _parse_codex_jsonl,
 )
 from mapify_cli.skills_eval.eval_schema import (
     DispatchResult,
@@ -27,7 +29,12 @@ from mapify_cli.skills_eval.eval_schema import (
     EvalSetEntry,
     make_cell_id,
 )
-from mapify_cli.skills_eval.runner import load_eval_set, run_eval
+from mapify_cli.skills_eval.runner import (
+    default_run_path,
+    latest_run_path,
+    load_eval_set,
+    run_eval,
+)
 from mapify_cli.token_budget import TokenUsage
 
 
@@ -167,6 +174,135 @@ def test_vc3_resume_tolerates_malformed_trailing_line(tmp_path: Path) -> None:
     assert set(valid_ids) == {make_cell_id(0, 1, 0), make_cell_id(1, 1, 0)}
 
 
+def test_provider_scoped_run_paths_are_disjoint(tmp_path: Path) -> None:
+    claude = default_run_path(tmp_path, "map-x", "20260914T100000Z", "claude")
+    codex = default_run_path(tmp_path, "map-x", "20260914T100000Z", "codex")
+
+    assert claude != codex
+    assert claude.parent.name == "claude"
+    assert codex.parent.name == "codex"
+
+
+@pytest.mark.parametrize(
+    ("existing_provider", "requested_provider"),
+    [("claude", "codex"), ("codex", "claude")],
+)
+def test_resume_never_selects_other_provider_run(
+    tmp_path: Path, existing_provider: str, requested_provider: str
+) -> None:
+    existing = default_run_path(
+        tmp_path, "map-x", "20260914T100000Z", existing_provider
+    )
+    existing.parent.mkdir(parents=True)
+    existing.write_text(
+        json.dumps(
+            {
+                "cell_id": "p0-v1-r0",
+                "prompt": "p0",
+                "triggered_skill": "map-x",
+                "token_usage": None,
+                "duration_s": 0.1,
+                "provider": existing_provider,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert latest_run_path(tmp_path, "map-x", requested_provider) is None
+    assert latest_run_path(tmp_path, "map-x", existing_provider) == existing
+
+
+def test_resume_legacy_providerless_run_is_claude_only(tmp_path: Path) -> None:
+    legacy = default_run_path(tmp_path, "map-x", "20260914T100000Z")
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps(
+            {
+                "cell_id": "p0-v1-r0",
+                "prompt": "p0",
+                "triggered_skill": "map-x",
+                "token_usage": None,
+                "duration_s": 0.1,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert latest_run_path(tmp_path, "map-x", "claude") == legacy
+    assert latest_run_path(tmp_path, "map-x", "codex") is None
+
+
+def test_legacy_providerless_partial_run_ignores_trailing_fragment(
+    tmp_path: Path,
+) -> None:
+    legacy = default_run_path(tmp_path, "map-x", "20260914T100000Z")
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps(
+            {
+                "cell_id": make_cell_id(0, 1, 0),
+                "prompt": "p0",
+                "triggered_skill": "map-x",
+                "token_usage": None,
+                "duration_s": 0.1,
+            }
+        )
+        + '\n{"cell_id":"interrupted',
+        encoding="utf-8",
+    )
+
+    assert latest_run_path(tmp_path, "map-x", "claude") == legacy
+    written = run_eval(
+        skill="map-x",
+        entries=_entries(),
+        dispatcher=MockDispatcher(
+            triggered_skill="map-x", raw_output="ok", duration_s=0.1
+        ),
+        runs=1,
+        out_path=legacy,
+        resume=True,
+        provider="claude",
+    )
+
+    assert [record.cell_id for record in written] == [make_cell_id(1, 1, 0)]
+    assert _read_cell_ids(legacy).count(make_cell_id(0, 1, 0)) == 1
+    assert _read_cell_ids(legacy).count(make_cell_id(1, 1, 0)) == 1
+
+
+def test_resume_filters_cells_by_provider_for_legacy_shared_file(tmp_path: Path) -> None:
+    out = tmp_path / "legacy.jsonl"
+    out.write_text(
+        json.dumps(
+            {
+                "cell_id": "p0-v1-r0",
+                "prompt": "p0",
+                "triggered_skill": "map-x",
+                "token_usage": None,
+                "duration_s": 0.1,
+                "provider": "claude",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    disp = MockDispatcher(triggered_skill="map-x", raw_output="ok", duration_s=0.1)
+
+    written = run_eval(
+        skill="map-x",
+        entries=[_entries()[0]],
+        dispatcher=disp,
+        runs=1,
+        out_path=out,
+        resume=True,
+        provider="codex",
+    )
+
+    assert len(written) == 1
+    assert written[0].provider == "codex"
+
+
 def test_vc4_transient_cell_error_recorded_not_fatal(tmp_path: Path) -> None:
     """VC4: a per-cell dispatch error is recorded and does NOT abort the matrix."""
     out = tmp_path / "run.jsonl"
@@ -270,21 +406,34 @@ def test_vc2_dry_run_counts_no_dispatch(tmp_path: Path) -> None:
 
     def _raise_if_called(*_args: object, **_kwargs: object) -> None:
         dispatch_called.append(True)
-        raise AssertionError("ClaudeSubprocessDispatcher.dispatch must NOT be called in dry-run")
+        raise AssertionError(
+            "ClaudeSubprocessDispatcher.dispatch must NOT be called in dry-run"
+        )
 
     import mapify_cli.skills_eval.dispatcher as _disp_mod
+
     original = _disp_mod.ClaudeSubprocessDispatcher.dispatch
     _disp_mod.ClaudeSubprocessDispatcher.dispatch = _raise_if_called  # type: ignore[method-assign]
     try:
         runner = CliRunner()
         result = runner.invoke(
-            app, ["skill-eval", "run", "map-debug", "--eval-set", str(eval_file), "--dry-run"]
+            app,
+            [
+                "skill-eval",
+                "run",
+                "map-debug",
+                "--eval-set",
+                str(eval_file),
+                "--dry-run",
+            ],
         )
     finally:
         _disp_mod.ClaudeSubprocessDispatcher.dispatch = original  # type: ignore[method-assign]
 
     assert result.exit_code == 0, result.output
-    assert "3" in result.output, f"expected planned count 3 in output: {result.output!r}"
+    assert "3" in result.output, (
+        f"expected planned count 3 in output: {result.output!r}"
+    )
     assert not dispatch_called, "dispatcher.dispatch was called during --dry-run"
 
 
@@ -317,10 +466,210 @@ def test_vc3_missing_claude_exits_nonzero(tmp_path: Path) -> None:
     finally:
         mapify_cli.shutil.which = original_which  # type: ignore[attr-defined]
 
-    assert result.exit_code != 0, f"expected nonzero exit, got 0; output: {result.output!r}"
+    assert result.exit_code != 0, (
+        f"expected nonzero exit, got 0; output: {result.output!r}"
+    )
     assert "requires-cmd: claude" in result.output, (
         f"expected 'requires-cmd: claude' in output: {result.output!r}"
     )
+
+
+def test_missing_codex_provider_exits_nonzero(tmp_path: Path) -> None:
+    """The Codex path checks the selected binary, not Claude."""
+    from typer.testing import CliRunner
+
+    import mapify_cli
+    from mapify_cli import app
+
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(
+        json.dumps({"entries": [{"prompt": "hello", "should_trigger": "map-plan"}]}),
+        encoding="utf-8",
+    )
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(mapify_cli.shutil, "which", lambda name: None)
+    try:
+        result = CliRunner().invoke(
+            app,
+            [
+                "skill-eval",
+                "run",
+                "map-plan",
+                "--provider",
+                "codex",
+                "--eval-set",
+                str(eval_file),
+            ],
+        )
+    finally:
+        monkeypatch.undo()
+    assert result.exit_code == 1
+    assert "requires-cmd: codex" in result.output
+
+
+def test_invalid_provider_dry_run_exits_2(tmp_path: Path) -> None:
+    """Dry-run still validates the selected provider name."""
+    from typer.testing import CliRunner
+
+    from mapify_cli import app
+
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(
+        json.dumps({"entries": [{"prompt": "hello"}]}), encoding="utf-8"
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "skill-eval",
+            "run",
+            "map-plan",
+            "--provider",
+            "invalid",
+            "--eval-set",
+            str(eval_file),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 2
+    assert "--provider must be claude or codex" in result.output
+
+
+@pytest.mark.parametrize(
+    ("first_provider", "resume_provider"),
+    [("claude", "codex"), ("codex", "claude")],
+)
+def test_cli_run_then_cross_provider_resume_stays_scoped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_provider: str,
+    resume_provider: str,
+) -> None:
+    """CLI --resume creates a separate run instead of consuming other-provider cells."""
+    from typer.testing import CliRunner
+
+    import mapify_cli
+    from mapify_cli import app
+
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(
+        json.dumps({"entries": [{"prompt": "hello"}]}), encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mapify_cli.shutil, "which", lambda _name: "/bin/fake")
+
+    def _dispatch(
+        _self: VariantDispatcher, _prompt: str
+    ) -> DispatchResult:
+        return DispatchResult(
+            raw_output="ok",
+            triggered_skill=None,
+            token_usage=None,
+            duration_s=0.01,
+        )
+
+    monkeypatch.setattr(ClaudeSubprocessDispatcher, "dispatch", _dispatch)
+    monkeypatch.setattr(CodexSubprocessDispatcher, "dispatch", _dispatch)
+
+    cli = CliRunner()
+    first = cli.invoke(
+        app,
+        [
+            "skill-eval",
+            "run",
+            "map-x",
+            "--provider",
+            first_provider,
+            "--eval-set",
+            str(eval_file),
+        ],
+    )
+    resumed = cli.invoke(
+        app,
+        [
+            "skill-eval",
+            "run",
+            "map-x",
+            "--provider",
+            resume_provider,
+            "--eval-set",
+            str(eval_file),
+            "--resume",
+        ],
+    )
+
+    assert first.exit_code == 0, first.output
+    assert resumed.exit_code == 0, resumed.output
+    run_root = tmp_path / ".map" / "eval-runs" / "map-x"
+    first_files = list((run_root / first_provider).glob("*.jsonl"))
+    resumed_files = list((run_root / resume_provider).glob("*.jsonl"))
+    assert len(first_files) == 1
+    assert len(resumed_files) == 1
+    assert json.loads(first_files[0].read_text(encoding="utf-8"))["provider"] == first_provider
+    assert json.loads(resumed_files[0].read_text(encoding="utf-8"))[
+        "provider"
+    ] == resume_provider
+
+
+def test_cli_resumes_providerless_claude_partial_run_with_trailing_fragment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import mapify_cli
+    from mapify_cli import app
+
+    eval_file = tmp_path / "eval.json"
+    eval_file.write_text(
+        json.dumps({"entries": [{"prompt": "p0"}, {"prompt": "p1"}]}),
+        encoding="utf-8",
+    )
+    legacy = default_run_path(tmp_path, "map-x", "20260914T100000Z")
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(
+        json.dumps(
+            {
+                "cell_id": make_cell_id(0, 1, 0),
+                "prompt": "p0",
+                "triggered_skill": None,
+                "token_usage": None,
+                "duration_s": 0.1,
+            }
+        )
+        + '\n{"cell_id":"interrupted',
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(mapify_cli.shutil, "which", lambda _name: "/bin/fake")
+
+    def _dispatch(
+        _self: ClaudeSubprocessDispatcher, _prompt: str
+    ) -> DispatchResult:
+        return DispatchResult(
+            raw_output="ok",
+            triggered_skill=None,
+            token_usage=None,
+            duration_s=0.01,
+        )
+
+    monkeypatch.setattr(ClaudeSubprocessDispatcher, "dispatch", _dispatch)
+    result = CliRunner().invoke(
+        app,
+        [
+            "skill-eval",
+            "run",
+            "map-x",
+            "--provider",
+            "claude",
+            "--eval-set",
+            str(eval_file),
+            "--resume",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert _read_cell_ids(legacy).count(make_cell_id(0, 1, 0)) == 1
+    assert _read_cell_ids(legacy).count(make_cell_id(1, 1, 0)) == 1
+    assert not (legacy.parent / "claude").exists()
 
 
 def test_dry_run_malformed_eval_set_exits_2(tmp_path: Path) -> None:
@@ -341,18 +690,28 @@ def test_dry_run_malformed_eval_set_exits_2(tmp_path: Path) -> None:
         raise AssertionError("dispatch must NOT be called on malformed eval-set")
 
     import mapify_cli.skills_eval.dispatcher as _disp_mod
+
     original = _disp_mod.ClaudeSubprocessDispatcher.dispatch
     _disp_mod.ClaudeSubprocessDispatcher.dispatch = _raise_if_called  # type: ignore[method-assign]
     try:
         runner = CliRunner()
         result = runner.invoke(
             app,
-            ["skill-eval", "run", "map-debug", "--eval-set", str(eval_file), "--dry-run"],
+            [
+                "skill-eval",
+                "run",
+                "map-debug",
+                "--eval-set",
+                str(eval_file),
+                "--dry-run",
+            ],
         )
     finally:
         _disp_mod.ClaudeSubprocessDispatcher.dispatch = original  # type: ignore[method-assign]
 
-    assert result.exit_code == 2, f"expected exit 2, got {result.exit_code}; output: {result.output!r}"
+    assert result.exit_code == 2, (
+        f"expected exit 2, got {result.exit_code}; output: {result.output!r}"
+    )
     assert not dispatch_called, "dispatcher.dispatch was called on malformed eval-set"
 
 
@@ -370,8 +729,103 @@ def test_vc1_abc_returns_dispatchresult() -> None:
     assert result.raw_output == "hello"
     # VariantDispatcher is abstract — instantiating raises TypeError
     import pytest as _pytest
+
     with _pytest.raises(TypeError):
         VariantDispatcher()  # type: ignore[abstract]
+
+
+def test_codex_jsonl_parser_extracts_instrumented_skill_message_and_usage() -> None:
+    """Codex activation is observed through the temporary skill-body marker."""
+    events = [
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "agent_message",
+                "text": 'planned\n<map-skill-eval-triggered name="map-plan" />',
+            },
+        },
+        {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 12,
+                "cached_input_tokens": 3,
+                "output_tokens": 4,
+            },
+        },
+    ]
+    output, usage, skill = _parse_codex_jsonl(
+        "\n".join(json.dumps(event) for event in events)
+    )
+    assert output == "planned"
+    assert skill == "map-plan"
+    assert usage is not None
+    assert usage.input_tokens == 9
+    assert usage.cache_read_input_tokens == 3
+    assert usage.total == 12
+
+
+def test_codex_dispatcher_uses_isolated_seed_and_exec_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Codex backend seeds both provider trees and never mutates sources."""
+    agents = tmp_path / ".agents"
+    codex = tmp_path / ".codex"
+    (agents / "skills" / "map-plan").mkdir(parents=True)
+    (agents / "skills" / "map-plan" / "SKILL.md").write_text(
+        "---\nname: map-plan\ndescription: Plan work\n---\n\n"
+        "RAISE IF THIS PRODUCTION BODY EXECUTES\n"
+    )
+    codex.mkdir()
+    (codex / "config.toml").write_text("[features]\n")
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> object:
+        cwd = Path(str(kwargs["cwd"]))
+        seen["argv"] = argv
+        seen["seeded"] = (
+            (cwd / ".agents" / "skills" / "map-plan" / "SKILL.md").exists(),
+            (cwd / ".codex" / "config.toml").exists(),
+        )
+        seen["instrumented"] = "map-skill-eval-triggered" in (
+            cwd / ".agents" / "skills" / "map-plan" / "SKILL.md"
+        ).read_text()
+        seen["body_replaced"] = "RAISE IF" not in (
+            cwd / ".agents" / "skills" / "map-plan" / "SKILL.md"
+        ).read_text()
+        event = {
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "ok"},
+        }
+        return type(
+            "Proc",
+            (),
+            {"returncode": 0, "stdout": json.dumps(event), "stderr": ""},
+        )()
+
+    monkeypatch.setattr(_disp_mod.subprocess, "run", fake_run)
+    result = CodexSubprocessDispatcher(
+        source_agents_dir=agents,
+        source_codex_dir=codex,
+        max_retries=0,
+    ).dispatch("prompt")
+
+    assert seen["argv"] == [
+        "codex",
+        "exec",
+        "--json",
+        "--sandbox",
+        "read-only",
+        "--ephemeral",
+        "--ignore-user-config",
+        "--ignore-rules",
+        "--skip-git-repo-check",
+        "-",
+    ]
+    assert seen["seeded"] == (True, True)
+    assert seen["instrumented"] is True
+    assert seen["body_replaced"] is True
+    assert result.raw_output == "ok"
+    assert agents.exists() and codex.exists()
 
 
 def test_vc2_mock_dispatcher_sets_triggered_skill_no_subprocess() -> None:
@@ -384,6 +838,7 @@ def test_vc2_mock_dispatcher_sets_triggered_skill_no_subprocess() -> None:
     import ast as _ast
     import inspect
     import textwrap
+
     source = textwrap.dedent(inspect.getsource(MockDispatcher.dispatch))
     tree = _ast.parse(source)
     for node in _ast.walk(tree):
@@ -421,6 +876,7 @@ def test_vc4_backoff_bounded_on_transient_failure(
     ) -> object:
         call_count[0] += 1
         import subprocess as _sp
+
         result = _sp.CompletedProcess(args=argv, returncode=1, stdout="", stderr="err")
         return result
 
@@ -468,21 +924,22 @@ def test_vc3_subprocess_cwd_is_temp_not_repo_map(
         cwd_val = kwargs.get("cwd")
         if cwd_val is not None:
             cwd_path = Path(str(cwd_val))
-            cwd_observations.append({
-                "cwd": cwd_path,
-                "claude_exists": (cwd_path / ".claude").exists(),
-                "map_exists": (cwd_path / ".map").exists(),
-            })
+            cwd_observations.append(
+                {
+                    "cwd": cwd_path,
+                    "claude_exists": (cwd_path / ".claude").exists(),
+                    "map_exists": (cwd_path / ".map").exists(),
+                }
+            )
         # Return a valid JSON envelope so dispatch() parses successfully.
         import subprocess as _sp
+
         envelope = (
             '{"result": "ok", "session_id": "test-session",'
             ' "usage": {"input_tokens": 1, "cache_read_input_tokens": 0,'
             ' "cache_creation_input_tokens": 0}}'
         )
-        return _sp.CompletedProcess(
-            args=argv, returncode=0, stdout=envelope, stderr=""
-        )
+        return _sp.CompletedProcess(args=argv, returncode=0, stdout=envelope, stderr="")
 
     def _noop_sleep(seconds: object) -> None:
         pass
@@ -622,6 +1079,7 @@ def test_vc3_trigger_and_not_trigger_including_none() -> None:
 def test_vc2_no_anthropic_import_in_skills_eval() -> None:
     """VC2 / INV-3: no 'anthropic' import and no ANTHROPIC_API_KEY env read in skills_eval."""
     import ast as _ast
+
     skills_eval_dir = (
         Path(__file__).parent.parent / "src" / "mapify_cli" / "skills_eval"
     )
@@ -661,20 +1119,24 @@ def test_vc2_no_anthropic_import_in_skills_eval() -> None:
                 slice_val = node.slice
                 # Python 3.9+: slice is the node directly
                 key_node = slice_val
-                if isinstance(key_node, _ast.Constant) and isinstance(key_node.value, str):
+                if isinstance(key_node, _ast.Constant) and isinstance(
+                    key_node.value, str
+                ):
                     assert "ANTHROPIC_API_KEY" not in key_node.value, (
                         f"Found ANTHROPIC_API_KEY env read in {py_file}"
                     )
             if isinstance(node, _ast.Call):
                 # os.getenv("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
                 func = node.func
-                is_getenv = (
-                    isinstance(func, _ast.Attribute)
-                    and func.attr in ("getenv", "get")
+                is_getenv = isinstance(func, _ast.Attribute) and func.attr in (
+                    "getenv",
+                    "get",
                 )
                 if is_getenv and node.args:
                     first_arg = node.args[0]
-                    if isinstance(first_arg, _ast.Constant) and isinstance(first_arg.value, str):
+                    if isinstance(first_arg, _ast.Constant) and isinstance(
+                        first_arg.value, str
+                    ):
                         assert "ANTHROPIC_API_KEY" not in first_arg.value, (
                             f"Found ANTHROPIC_API_KEY env read in {py_file}"
                         )

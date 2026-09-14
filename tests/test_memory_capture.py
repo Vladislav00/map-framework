@@ -285,6 +285,63 @@ class TestVC3SecurityRedaction:
         record = _read_jsonl(next(iter(scratch.glob("*.jsonl"))))[0]
         assert record["files_touched"] == ["src/app.py"]
 
+    def test_vc3_codex_apply_patch_paths_are_captured(self, tmp_path: Path) -> None:
+        """Codex apply_patch payloads retain every explicit target path."""
+        _make_fake_git(tmp_path)
+        stdin: dict[str, Any] = {
+            "session_id": "s1",
+            "tool_name": "apply_patch",
+            "tool_input": {
+                "command": "*** Begin Patch\n"
+                "*** Update File: src/app.py\n"
+                "*** Move to: src/main.py\n"
+                "*** Add File: tests/test_main.py\n"
+                "*** End Patch\n"
+            },
+        }
+        append_turn(stdin, tmp_path)
+
+        scratch = _scratch_dir(tmp_path)
+        record = _read_jsonl(next(iter(scratch.glob("*.jsonl"))))[0]
+        assert record["files_touched"] == [
+            "src/app.py",
+            "tests/test_main.py",
+            "src/main.py",
+        ]
+
+    def test_vc3_codex_transcript_file_change_is_captured(
+        self, tmp_path: Path
+    ) -> None:
+        """Codex item.completed file_change records feed memory capture."""
+        _make_fake_git(tmp_path)
+        transcript = tmp_path / "codex.jsonl"
+        transcript.write_text(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "file_change",
+                        "changes": [
+                            {"path": "src/codex.py", "kind": "update"},
+                            {"path": ".env", "kind": "add"},
+                        ],
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        append_turn(
+            {"session_id": "s1", "transcript_path": str(transcript)}, tmp_path
+        )
+
+        scratch = _scratch_dir(tmp_path)
+        record = _read_jsonl(next(iter(scratch.glob("*.jsonl"))))[0]
+        assert record["files_touched"] == [
+            "src/codex.py",
+            "<redacted-secret-path>",
+        ]
+
     def test_vc3_control_char_in_value_is_stripped(self, tmp_path: Path) -> None:
         """Control characters in a session_id value are stripped before writing."""
         _make_fake_git(tmp_path)

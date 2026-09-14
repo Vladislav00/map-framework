@@ -24,6 +24,7 @@ import hashlib
 import json
 import shutil
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 from mapify_cli.skills_eval.aggregator import aggregate
@@ -114,7 +115,7 @@ def _set_frontmatter_description(content: str, new_desc: str) -> str:
         raise ValueError("SKILL.md frontmatter has no closing '---'")
 
     frontmatter = content[4:close_idx]  # between opening and closing ---
-    body_after = content[close_idx:]    # from \n--- onward (inclusive)
+    body_after = content[close_idx:]  # from \n--- onward (inclusive)
 
     # Find the description line inside the frontmatter.
     fm_lines = frontmatter.split("\n")
@@ -125,9 +126,7 @@ def _set_frontmatter_description(content: str, new_desc: str) -> str:
             break
 
     if desc_line_idx is None:
-        raise ValueError(
-            "SKILL.md frontmatter does not contain a 'description:' key"
-        )
+        raise ValueError("SKILL.md frontmatter does not contain a 'description:' key")
 
     # Consume the description value's continuation lines: a block scalar
     # (``description: |`` / ``>``) or any plain multi-line value spans the
@@ -243,6 +242,8 @@ def _run_one_iteration(
     source_claude_dir: Path,
     out_dir: Path,
     run_ts: str,
+    provider_dir_name: str = ".claude",
+    dispatcher_factory: Callable[[Path], VariantDispatcher] | None = None,
 ) -> OptimizeIterationRecord:
     """Seed a throwaway temp dir, patch the description, run train+test.
 
@@ -255,8 +256,8 @@ def _run_one_iteration(
 
     cand_root = Path(tempfile.mkdtemp(prefix="mapeval-candidate-"))
     try:
-        # Seed the candidate .claude/ tree from production source
-        cand_claude = cand_root / ".claude"
+        # Seed the provider skill tree from production source.
+        cand_claude = cand_root / provider_dir_name
         shutil.copytree(source_claude_dir, cand_claude)
 
         # Patch the description in the throwaway copy only (INV-5)
@@ -265,6 +266,8 @@ def _run_one_iteration(
         # Dispatcher: injected (tests) or fresh production dispatcher
         if dispatcher is not None:
             iter_dispatcher: VariantDispatcher = dispatcher
+        elif dispatcher_factory is not None:
+            iter_dispatcher = dispatcher_factory(cand_claude)
         else:
             iter_dispatcher = ClaudeSubprocessDispatcher(
                 source_claude_dir=cand_claude,
@@ -377,6 +380,8 @@ def optimize(
     run_ts: str,
     iterations: int = 5,
     seed: int = _DEFAULT_SEED,
+    provider_dir_name: str = ".claude",
+    dispatcher_factory: Callable[[Path], VariantDispatcher] | None = None,
 ) -> OptimizeResult:
     """Run N-iteration description optimization; return the best candidate.
 
@@ -453,6 +458,8 @@ def optimize(
             source_claude_dir=source_claude_dir,
             out_dir=out_dir,
             run_ts=run_ts,
+            provider_dir_name=provider_dir_name,
+            dispatcher_factory=dispatcher_factory,
         )
 
         if i == 0:

@@ -31,34 +31,34 @@ dev-install:
 # global Homebrew install whose interpreter lacks truststore/hypothesis),
 # producing phantom failures that disappear under `uv run`.
 test:
-	uv run pytest
+	uv run --extra test --extra ssl pytest
 
 test-cov:
-	uv run pytest --cov=mapify_cli --cov-report=html --cov-report=term
+	uv run --extra test --extra ssl pytest --cov=mapify_cli --cov-report=html --cov-report=term
 
 test-watch:
-	uv run pytest-watch
+	uv run --extra dev pytest-watch
 
 # E2E / Integration testing
 test-e2e:
-	uv run pytest tests/integration/test_e2e_artifact_contracts.py -v
+	uv run --extra test --extra ssl pytest tests/integration/test_e2e_artifact_contracts.py -v
 
 test-e2e-sdk:
-	uv run pytest tests/integration/test_e2e_claude_sdk.py -v -m slow
+	uv run --extra test --extra ssl pytest tests/integration/test_e2e_claude_sdk.py -v -m slow
 
 test-integration:
-	uv run pytest tests/integration/ -v -m "not slow"
+	uv run --extra test --extra ssl pytest tests/integration/ -v -m "not slow"
 
 # Code quality
 lint:
-	uv run ruff check src/ tests/
-	uv run mypy src/
-	uv run pyright src/
-	uv run python3 scripts/lint-hooks.py
+	uv run --extra dev ruff check src/ tests/
+	uv run --extra dev mypy src/
+	uv run --extra dev pyright src/
+	uv run --extra dev python3 scripts/lint-hooks.py
 
 format:
-	uv run black src/ tests/
-	uv run ruff check --fix src/ tests/
+	uv run --extra dev black src/ tests/
+	uv run --extra dev ruff check --fix src/ tests/
 
 check: lint test check-render
 

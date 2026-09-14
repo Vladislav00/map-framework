@@ -94,6 +94,11 @@ def main() -> None:
         # agent_type is the real sub-agent name (actor/monitor/...); empty
         # lets the runner fall back to the active-phase mapping.
         agent = str(input_data.get("agent_type", "") or "")
+    elif input_data.get("hook_event_name") == "SubagentStop":
+        # Codex exposes the completed subagent through the ordinary transcript
+        # field and identifies it with agent_type.
+        transcript_path = input_data.get("transcript_path", "")
+        agent = str(input_data.get("agent_type", "") or "subagent")
     else:
         transcript_path = input_data.get("transcript_path", "")
         # Main-session driving turns belong to the orchestrator, not a phase

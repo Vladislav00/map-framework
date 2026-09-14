@@ -150,7 +150,7 @@ def calculate_effectiveness(tool_name: str, tool_response: dict | None) -> float
             return 0.3
 
     # Edit/Write: check for explicit success/error fields
-    if tool_name in ("Edit", "Write"):
+    if tool_name in ("Edit", "Write", "apply_patch"):
         if tool_response.get("error"):
             return 0.3
         if tool_response.get("success") is False:
@@ -244,8 +244,18 @@ def main() -> None:
 
     # Extract file path for Edit/Write tools
     file_path = ""
-    if tool_name in ("Edit", "Write"):
+    if tool_name in ("Edit", "Write", "apply_patch"):
         file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
+        if tool_name == "apply_patch" and not file_path:
+            command = tool_input.get("command", "")
+            if isinstance(command, str):
+                match = re.search(
+                    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$",
+                    command,
+                    re.MULTILINE,
+                )
+                if match:
+                    file_path = match.group(1).strip()
 
     # Calculate effectiveness using structured approach
     effectiveness = calculate_effectiveness(tool_name, tool_response)

@@ -21,6 +21,8 @@ from pathlib import Path
 REPO = Path(__file__).parent.parent
 AGENTS_SRC = REPO / "src" / "mapify_cli" / "templates_src" / "agents"
 SKILLS_SRC = REPO / "src" / "mapify_cli" / "templates_src" / "skills"
+CODEX_AGENTS_SRC = REPO / "src" / "mapify_cli" / "templates_src" / "codex" / "agents"
+CODEX_SKILLS_SRC = REPO / "src" / "mapify_cli" / "templates_src" / "codex" / "skills"
 ARCHITECTURE = REPO / "docs" / "ARCHITECTURE.md"
 
 # Agents that intentionally have NO skill-initiated dispatch site. Retained per the
@@ -30,6 +32,7 @@ ARCHITECTURE = REPO / "docs" / "ARCHITECTURE.md"
 DOCUMENTED_OPTIONAL_AGENTS = {"documentation-reviewer"}
 
 _DISPATCH_RE = re.compile(r'subagent_type=["\']([a-z0-9-]+)["\']')
+_CODEX_DISPATCH_RE = re.compile(r'agent_type=["\']([a-z0-9-]+)["\']')
 
 
 def _shipped_agent_names() -> set[str]:
@@ -41,6 +44,18 @@ def _dispatched_agent_names() -> set[str]:
     names: set[str] = set()
     for jinja in SKILLS_SRC.rglob("*.jinja"):
         names.update(_DISPATCH_RE.findall(jinja.read_text(encoding="utf-8")))
+    return names
+
+
+def _codex_agent_names() -> set[str]:
+    suffix = ".toml.jinja"
+    return {p.name[: -len(suffix)] for p in CODEX_AGENTS_SRC.glob("*.toml.jinja")}
+
+
+def _codex_dispatched_agent_names() -> set[str]:
+    names: set[str] = set()
+    for jinja in CODEX_SKILLS_SRC.rglob("*.jinja"):
+        names.update(_CODEX_DISPATCH_RE.findall(jinja.read_text(encoding="utf-8")))
     return names
 
 
@@ -69,6 +84,17 @@ def test_every_agent_is_dispatched_or_documented_optional():
     )
 
 
+def test_every_codex_agent_is_dispatched_by_a_skill():
+    """Codex parity has no optional orphan roles: all nine are pipeline-wired."""
+    agents = _codex_agent_names()
+    dispatched = _codex_dispatched_agent_names()
+    assert len(agents) == 9, f"expected nine Codex roles, got {sorted(agents)}"
+    assert agents <= dispatched, (
+        f"Codex role(s) have no agent_type dispatch site: {sorted(agents - dispatched)}"
+    )
+    assert "documentation-reviewer" in dispatched
+
+
 def test_documented_optional_agents_exist_and_are_annotated():
     """Optional-agent registry must have no stale entries and each must self-declare."""
     agents = _shipped_agent_names()
@@ -90,3 +116,5 @@ def test_doctrine_documented_in_architecture():
     assert "Agent-Boundary Doctrine" in text, (
         "docs/ARCHITECTURE.md must document the Agent-Boundary Doctrine (issue #230)."
     )
+    assert "all nine Codex pipeline-dispatched agents" in text
+    assert "DocumentationReviewer | *(no skill dispatch" not in text
