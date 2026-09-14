@@ -96,10 +96,11 @@ include = [
 [tool.mypy]
 ignore_missing_imports = false
 exclude = [
-    # Generated provider trees contain deliberate same-name Claude/Codex
-    # scripts. Type-check their source/runtime suites instead of importing both
-    # generated copies as one Python package namespace.
-    "src/mapify_cli/templates/",
+    "src/mapify_cli/templates/map/scripts/",
+    # templates/codex/** re-renders Claude skill scripts under the same
+    # basenames (sofa_search.py); mypy maps both copies onto one module name.
+    # Exclude only the Codex copies -- pyright still checks both trees.
+    "src/mapify_cli/templates/codex/",
     "tests/skills_eval/fixtures/whole_skill/",
 ]
 
@@ -118,7 +119,6 @@ exclude = [
     "**/__pycache__",
     "**/.*",
     "tests/skills_eval/fixtures/whole_skill",
-    "src/mapify_cli/templates",
 ]
 
 [tool.ruff]

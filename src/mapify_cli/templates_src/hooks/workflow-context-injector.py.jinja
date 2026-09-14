@@ -26,6 +26,8 @@ from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
 
+[% include "_partials/apply-patch-paths.py.jinja" %]
+
 # Keep in sync with map_step_runner.py GOAL_HEADING_RE
 GOAL_HEADING_RE = r"## (?:Goal|Overview)\n(.*?)(?=\n##|\Z)"
 REMINDER_LIMIT = 700
@@ -795,15 +797,7 @@ def _extract_target_file(tool_name: str, tool_input: dict) -> str:
         if isinstance(file_path, str) and file_path.strip():
             return file_path.strip()
     if tool_name == "apply_patch":
-        command = tool_input.get("command", "")
-        if isinstance(command, str):
-            match = re.search(
-                r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$",
-                command,
-                re.MULTILINE,
-            )
-            if match:
-                return match.group(1).strip()
+        return next(iter(extract_apply_patch_paths(tool_input)), "")
     return ""
 
 

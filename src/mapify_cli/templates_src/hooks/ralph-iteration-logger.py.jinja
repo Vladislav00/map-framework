@@ -19,6 +19,8 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
+[% include "_partials/apply-patch-paths.py.jinja" %]
+
 # Paths - BRANCH-SCOPED
 PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
 MAP_DIR = PROJECT_DIR / ".map"
@@ -247,15 +249,7 @@ def main() -> None:
     if tool_name in ("Edit", "Write", "apply_patch"):
         file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
         if tool_name == "apply_patch" and not file_path:
-            command = tool_input.get("command", "")
-            if isinstance(command, str):
-                match = re.search(
-                    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$",
-                    command,
-                    re.MULTILINE,
-                )
-                if match:
-                    file_path = match.group(1).strip()
+            file_path = next(iter(extract_apply_patch_paths(tool_input)), "")
 
     # Calculate effectiveness using structured approach
     effectiveness = calculate_effectiveness(tool_name, tool_response)

@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Full Codex CLI provider support.** `mapify init --provider codex` now installs
+  all 23 MAP skills under `.agents/skills/`, the shared references under
+  `.agents/references/`, nine `.codex/agents/*.toml` roles (auto-discovered by
+  Codex; `[agents] max_threads/max_depth` bound subagent fan-out), and the full
+  hook lifecycle in `.codex/hooks.json` (`SessionStart`, `SessionEnd`,
+  `PreToolUse`, `PostToolUse`, `PreCompact`, `SubagentStop`, `Stop`,
+  `UserPromptSubmit`). Codex `apply_patch` payloads, rollout
+  `custom_tool_call`/`function_call` records, `token_count` events and
+  `codex exec --json` streams are translated into MAP's workflow-gate, memory
+  and token-accounting contracts. Memory finalization and `mapify skill-eval`
+  accept `--provider codex`; skill-eval runs are stored per provider under
+  `.map/eval-runs/<skill>/<provider>/`.
+- **Codex workflow gate covers explicit Bash writes.** `.codex/hooks/workflow-gate.py`
+  now phase-gates Bash commands whose write target is explicit (`>`/`>>`
+  redirection, `tee`, `sed -i`, `cp`/`mv`/`install`, `dd of=`, `sort`/`yq -o`,
+  `git --output`) on every line of a multi-line command, and denies targets that
+  still need shell expansion (`> "$FILE"`, globs) outside editing phases. A
+  command with no extractable target is not gated — the same documented
+  limitation as the Claude gate (#164) — so the orchestrator's own
+  `VAR=$(python3 .map/scripts/...)`, `pytest` and `jq` calls run in every phase.
+- `python -m mapify_cli` runs the CLI; the Codex memory hooks fall back to it when
+  `mapify` is not on `PATH` (`MAPIFY_CLI` still takes precedence).
+
+### Changed
+- **`safety-guardrails.py` checks sensitive basenames before the built-in safe
+  directories.** Previously a credential-looking file under a default safe prefix
+  (`src/config/secrets.yaml`, `tests/fixtures/credentials.json`) was allowed;
+  it is now denied for Read/Edit/Write and Codex `apply_patch`. An explicit
+  `safe_path_prefixes` list in `.map/config.yaml` still wins over the blocklist,
+  so projects that keep such fixtures opt in with one line.
+- `codex exec` argv and JSONL parsing live in one module
+  (`mapify_cli.codex_exec`); the memory finalizer now passes
+  `--skip-git-repo-check` like the skill-eval callers.
+- Codex hook registrations that mapify owns are recognised by the shipped
+  `.codex/hooks/` directory listing instead of a hand-maintained name list;
+  project-owned scripts in the same directory are preserved on reinstall.
+- `map-architecture` and `map-auto` Codex skills are rendered from the Claude
+  source (`PROVIDER`-conditional frontmatter and command prefix) instead of a
+  hand-copied twin.
+
+### Fixed
+- mypy/pyright no longer skip the shipped hook and runner scripts: the
+  type-check exclude is narrowed to `templates/map/scripts/` (mypy) and the
+  duplicate-basename `templates/codex/` copies (mypy only).
+- `.agents/references/` is tracked in `.map/mapify.lock.json`, so `mapify check`
+  and upgrades see it.
+- Memory capture under Codex records the files edited via `apply_patch` from real
+  rollout transcripts (`custom_tool_call` with a string `input`).
+
 ## [3.29.1] - 2026-08-29
 
 ### Fixed

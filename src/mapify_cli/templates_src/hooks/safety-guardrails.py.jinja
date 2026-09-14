@@ -21,8 +21,11 @@ import os
 import re
 import sys
 
+[% include "_partials/apply-patch-paths.py.jinja" %]
+
 # =============================================================================
-# Default constants (overridable via .map/config.yaml → safe_path_prefixes)
+# Default constants (overridable via .map/config.yaml → dangerous_file_patterns,
+# dangerous_commands, safe_path_prefixes)
 # =============================================================================
 
 # Dangerous file patterns (case-insensitive)
@@ -119,6 +122,11 @@ DANGEROUS_FILE_PATTERNS = _config.get(
 )
 DANGEROUS_COMMANDS = _config.get("dangerous_commands", _DEFAULT_DANGEROUS_COMMANDS)
 SAFE_PATH_PREFIXES = _config.get("safe_path_prefixes", _DEFAULT_SAFE_PATH_PREFIXES)
+# An operator who wrote safe_path_prefixes into .map/config.yaml supplied an
+# explicit allowlist; it wins over the sensitive-basename blocklist. The DEFAULT
+# prefixes do not: a nested credentials.json under tests/ stays denied unless
+# the project opts in.
+_SAFE_PATH_PREFIXES_EXPLICIT = "safe_path_prefixes" in _config
 
 
 def is_safe_path(path: str) -> bool:
@@ -129,6 +137,11 @@ def is_safe_path(path: str) -> bool:
 def check_file_safety(path: str) -> tuple[bool, str]:
     """Check if file path is safe to access. Returns (is_safe, reason)."""
     if not path:
+        return True, ""
+
+    # Explicit operator allowlist (.map/config.yaml -> safe_path_prefixes)
+    # short-circuits the blocklist; the built-in default prefixes do not.
+    if _SAFE_PATH_PREFIXES_EXPLICIT and is_safe_path(path):
         return True, ""
 
     # Check dangerous patterns against the basename only, not the full path.
@@ -151,11 +164,6 @@ def check_file_safety(path: str) -> tuple[bool, str]:
                 False,
                 f"Blocked: Access to sensitive file pattern '{pattern}' in path: {path}",
             )
-
-    # Allowlisted directories reduce false positives only after the sensitive
-    # basename blocklist has had a chance to reject nested credential files.
-    if is_safe_path(path):
-        return True, ""
 
     return True, ""
 
@@ -389,23 +397,6 @@ def deny(reason: str) -> None:
     sys.exit(0)
 
 
-def extract_apply_patch_paths(command: object) -> list[str]:
-    """Extract only explicit Codex apply_patch file headers."""
-    if not isinstance(command, str):
-        return []
-    paths: list[str] = []
-    for pattern in (
-        r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$",
-        r"^\*\*\* Move to:\s*(.+?)\s*$",
-    ):
-        paths.extend(
-            match.group(1).strip()
-            for match in re.finditer(pattern, command, re.MULTILINE)
-            if match.group(1).strip()
-        )
-    return list(dict.fromkeys(paths))
-
-
 def main() -> None:
     try:
         input_data = json.load(sys.stdin)
@@ -431,7 +422,7 @@ def main() -> None:
                 deny(f"{reason} (tool={tool_name})")
 
     elif tool_name == "apply_patch":
-        for file_path in extract_apply_patch_paths(tool_input.get("command", "")):
+        for file_path in extract_apply_patch_paths(tool_input):
             is_safe, reason = check_file_safety(file_path)
             if not is_safe:
                 deny(f"{reason} (tool={tool_name})")

@@ -1005,6 +1005,10 @@ class TestSafetyGuardrailsHookConfig:
             assert mod.is_safe_path("also_safe/data.json")
             # src/ should NOT be safe (default overridden)
             assert not mod.is_safe_path("src/main.py")
+            # An EXPLICIT operator allowlist wins over the sensitive-basename
+            # blocklist; anything outside it is still denied by basename.
+            assert mod.check_file_safety("custom_safe/credentials.json") == (True, "")
+            assert not mod.check_file_safety("src/credentials.json")[0]
         finally:
             if old_env is None:
                 os.environ.pop("CLAUDE_PROJECT_DIR", None)

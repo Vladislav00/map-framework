@@ -44,6 +44,32 @@ from collections import Counter
 from datetime import UTC, datetime
 from pathlib import Path
 
+# --- shared: Codex apply_patch target extraction (rendered from
+# templates_src/_partials/apply-patch-paths.py.jinja; edit the partial) ---
+_APPLY_PATCH_HEADER_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$", re.MULTILINE
+)
+_APPLY_PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def extract_apply_patch_paths(payload: object) -> list[str]:
+    """Return the file targets named by explicit Codex apply_patch headers.
+
+    Accepts the raw patch text or the tool_input mapping Codex hands to hooks
+    (patch text under ``command``, ``input`` or ``patch``). Only explicit
+    ``*** Add/Update/Delete File:`` and ``*** Move to:`` headers count; paths
+    are never inferred from added or removed content. Order is preserved and
+    duplicates are dropped.
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("command") or payload.get("input") or payload.get("patch")
+    if not isinstance(payload, str):
+        return []
+    paths = [m.group(1).strip() for m in _APPLY_PATCH_HEADER_RE.finditer(payload)]
+    paths += [m.group(1).strip() for m in _APPLY_PATCH_MOVE_RE.finditer(payload)]
+    return list(dict.fromkeys(p for p in paths if p))
+
+
 # Paths - BRANCH-SCOPED
 PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd()))
 MAP_DIR = PROJECT_DIR / ".map"
@@ -272,15 +298,7 @@ def main() -> None:
     if tool_name in ("Edit", "Write", "apply_patch"):
         file_path = tool_input.get("file_path", "") or tool_input.get("path", "")
         if tool_name == "apply_patch" and not file_path:
-            command = tool_input.get("command", "")
-            if isinstance(command, str):
-                match = re.search(
-                    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$",
-                    command,
-                    re.MULTILINE,
-                )
-                if match:
-                    file_path = match.group(1).strip()
+            file_path = next(iter(extract_apply_patch_paths(tool_input)), "")
 
     # Calculate effectiveness using structured approach
     effectiveness = calculate_effectiveness(tool_name, tool_response)

@@ -250,18 +250,33 @@ _EDIT_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "apply_pa
 _PATCH_PATH_RE = re.compile(
     r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$", re.MULTILINE
 )
+_PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to:\s*(.+?)\s*$", re.MULTILINE)
+# Runtime twin of templates_src/_partials/apply-patch-paths.py.jinja (hooks
+# cannot import mapify_cli); keep the two in step.
 
 
-def _apply_patch_paths(command: object) -> list[str]:
-    """Return explicit file targets from a Codex ``apply_patch`` command."""
-    if not isinstance(command, str):
+def _apply_patch_paths(payload: object) -> list[str]:
+    """Return explicit file targets from a Codex ``apply_patch`` payload.
+
+    Codex records the call in three shapes: hook ``tool_input`` mappings
+    (``{"command": <patch>}``), rollout ``custom_tool_call`` items whose
+    ``input`` is the raw patch text, and ``function_call`` items whose
+    ``arguments`` is a JSON string. Only explicit patch headers count.
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("command") or payload.get("input") or payload.get("patch")
+    if isinstance(payload, str) and payload.lstrip().startswith("{"):
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            return _apply_patch_paths(decoded)
+    if not isinstance(payload, str):
         return []
-    paths = [match.group(1) for match in _PATCH_PATH_RE.finditer(command)]
-    paths.extend(
-        match.group(1)
-        for match in re.finditer(r"^\*\*\* Move to:\s*(.+?)\s*$", command, re.MULTILINE)
-    )
-    return paths
+    paths = [m.group(1).strip() for m in _PATCH_PATH_RE.finditer(payload)]
+    paths += [m.group(1).strip() for m in _PATCH_MOVE_RE.finditer(payload)]
+    return [path for path in paths if path]
 
 
 def _redact_and_dedup(paths: list[str]) -> list[str]:
@@ -279,19 +294,24 @@ def _redact_and_dedup(paths: list[str]) -> list[str]:
 def _extract_edit_paths(obj: Any, out: list[str]) -> None:
     """Recursively collect paths from Claude and Codex transcript records."""
     if isinstance(obj, dict):
-        if obj.get("type") == "tool_use" and obj.get("name") in _EDIT_TOOLS:
+        name = obj.get("tool_name") or obj.get("name")
+        if name == "apply_patch":
+            # Hook payloads carry tool_input; Claude-style tool_use blocks carry
+            # input as a dict; Codex rollout custom_tool_call items carry the
+            # raw patch in input, function_call items a JSON string in arguments.
+            for key in ("tool_input", "input", "arguments"):
+                if key in obj:
+                    out.extend(_apply_patch_paths(obj.get(key)))
+        elif obj.get("type") == "tool_use" and name in _EDIT_TOOLS:
             tool_input = obj.get("input")
             if isinstance(tool_input, dict):
-                if obj.get("name") == "apply_patch":
-                    out.extend(_apply_patch_paths(tool_input.get("command")))
-                else:
-                    raw_path = tool_input.get("file_path") or tool_input.get("path")
-                    if raw_path:
-                        out.append(str(raw_path))
+                raw_path = tool_input.get("file_path") or tool_input.get("path")
+                if raw_path:
+                    out.append(str(raw_path))
 
-        # Codex JSONL emits completed file-change items with one entry per
-        # changed path.  Keep this intentionally shape-tolerant because the
-        # outer event envelope has changed across Codex releases.
+        # `codex exec --json` emits completed file-change items with one entry
+        # per changed path. Shape-tolerant: the outer envelope has changed
+        # across Codex releases.
         if obj.get("type") == "file_change":
             changes = obj.get("changes")
             if isinstance(changes, list):
@@ -301,10 +321,6 @@ def _extract_edit_paths(obj: Any, out: list[str]) -> None:
                         if raw_path:
                             out.append(str(raw_path))
 
-        tool_name = obj.get("tool_name") or obj.get("name")
-        tool_input = obj.get("tool_input") or obj.get("input")
-        if tool_name == "apply_patch" and isinstance(tool_input, dict):
-            out.extend(_apply_patch_paths(tool_input.get("command")))
         for value in obj.values():
             _extract_edit_paths(value, out)
     elif isinstance(obj, list):
@@ -384,9 +400,7 @@ def _derive_files_touched(
             return [], None
         tool_input: dict[str, Any] = stdin_data.get("tool_input") or {}
         if tool_name == "apply_patch":
-            return _redact_and_dedup(
-                _apply_patch_paths(tool_input.get("command"))
-            ), None
+            return _redact_and_dedup(_apply_patch_paths(tool_input)), None
         raw_path = tool_input.get("file_path", "") or tool_input.get("path", "")
         if not raw_path:
             return [], None

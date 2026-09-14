@@ -5,6 +5,7 @@ This hook replaces the old block-secrets.py and block-dangerous.sh hooks.
 Tests file blocking and dangerous command blocking.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -225,6 +226,7 @@ class TestSafePathPrefixes:
         ],
     )
     def test_nested_sensitive_name_overrides_safe_prefix(self, path):
+        """DEFAULT prefixes never mask a sensitive basename (Write and apply_patch)."""
         patch = (
             "*** Begin Patch\n"
             f"*** Update File: {path}\n"
@@ -233,6 +235,44 @@ class TestSafePathPrefixes:
         exit_code, stdout, _ = run_hook_apply_patch(patch)
         assert exit_code == 0
         _assert_denied(_parse_stdout(stdout))
+        exit_code, stdout, _ = run_hook_file("Write", path)
+        assert exit_code == 0
+        _assert_denied(_parse_stdout(stdout))
+
+    def test_explicit_safe_path_prefix_override_is_honoured(self, tmp_path):
+        """An operator allowlist in .map/config.yaml wins over the basename blocklist."""
+        (tmp_path / ".map").mkdir()
+        (tmp_path / ".map" / "config.yaml").write_text(
+            "safe_path_prefixes:\n  - tests/fixtures/\n", encoding="utf-8"
+        )
+        for tool in ("Write", "Read"):
+            result = subprocess.run(
+                [sys.executable, str(HOOK_PATH)],
+                input=json.dumps(
+                    {
+                        "tool_name": tool,
+                        "tool_input": {"file_path": "tests/fixtures/credentials.json"},
+                    }
+                ),
+                capture_output=True,
+                text=True,
+                env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)},
+                check=False,
+            )
+            assert result.returncode == 0
+            assert _parse_stdout(result.stdout) == {}, (tool, result.stdout)
+        # Outside the explicit allowlist the basename blocklist still applies.
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=json.dumps(
+                {"tool_name": "Write", "tool_input": {"file_path": "src/credentials.json"}}
+            ),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)},
+            check=False,
+        )
+        _assert_denied(_parse_stdout(result.stdout))
 
 
 # =============================================================================

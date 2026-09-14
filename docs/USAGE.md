@@ -534,6 +534,19 @@ the same `safety-guardrails.py` policy hook for `Bash` and `apply_patch`; the
 autonomy-only commit/push restriction remains inactive without the Claude
 sentinel.
 
+`safety-guardrails.py` checks the sensitive-basename blocklist (`.env*`,
+`*credentials*`, `*secrets*`, private keys, ...) **before** its built-in safe
+directories, so `src/config/secrets.yaml` or `tests/fixtures/credentials.json`
+is denied for Read/Edit/Write and Codex `apply_patch` even though `src/` and
+`tests/` are safe prefixes by default. A project that keeps such fixtures opts
+in with an explicit allowlist in `.map/config.yaml` — that list wins over the
+blocklist:
+
+```yaml
+safe_path_prefixes:
+  - tests/fixtures/
+```
+
 ## Codex CLI Provider
 
 MAP Framework supports OpenAI's Codex CLI as an alternative to Claude Code.
@@ -563,8 +576,15 @@ This creates a Codex layout instead of `.claude/`:
 Codex registers `SessionStart`, `SessionEnd`, `PreToolUse`, `PostToolUse`,
 `PreCompact`, `SubagentStop`, `Stop`, and `UserPromptSubmit`. Re-prime context
 after compaction uses Codex's supported `SessionStart` matcher `compact`.
-`apply_patch` payloads and Codex `turn.completed` / `file_change` transcript
-records are translated into MAP's workflow-gate, memory, and token contracts.
+`apply_patch` payloads, rollout `custom_tool_call` records, `token_count`
+events and `codex exec --json` streams are translated into MAP's workflow-gate,
+memory, and token contracts. The Codex workflow gate also phase-gates Bash
+commands whose write target is explicit (`>`/`>>`, `tee`, `sed -i`, `cp`/`mv`,
+`dd of=`, `sort`/`yq -o`, `git --output`) on every line of the command and
+denies targets that still need shell expansion outside editing phases; a
+command with no extractable target is not gated (the same limitation as the
+Claude gate, #164), so `VAR=$(python3 .map/scripts/...)`, `pytest` and `jq`
+run in every phase.
 Session-start memory finalization and recall run through one ordered wrapper so
 they cannot race even though Codex executes peer hook handlers concurrently.
 

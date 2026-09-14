@@ -103,9 +103,16 @@ configured roles. Codex skills translate Claude task fan-out into
 `spawn_agent`/`followup_task`; Actor is the sole `workspace-write` role and all
 review/research roles are `read-only`. Lifecycle parity is implemented through
 eight Codex event groups, with post-compaction context delivered by the
-`SessionStart` `compact` matcher. Provider adapters normalize `apply_patch`,
-`file_change`, and `turn.completed` into the same workflow gate, memory, and
-token-accounting engines used by Claude. The only intentional UI-level gap is
+`SessionStart` `compact` matcher. Provider adapters normalize `apply_patch`
+(hook payloads and rollout `custom_tool_call`/`function_call` records),
+`file_change`, `token_count` and `turn.completed` into the same workflow gate,
+memory, and token-accounting engines used by Claude; the Codex gate additionally
+phase-gates Bash writes with an explicit target and leaves opaque commands
+ungated (#164 parity). `apply_patch` header parsing is one shared partial
+(`templates_src/_partials/apply-patch-paths.py.jinja`) with a runtime twin in
+`memory/capture.py`; `codex exec --json` argv and event parsing live in
+`mapify_cli.codex_exec`; provider names and directories in
+`mapify_cli.provider_registry`. The only intentional UI-level gap is
 Claude's command-driven dynamic `statusLine` renderer. Codex does provide the
 project-level `[tui].status_line` setting, but it accepts an ordered list of
 built-in item identifiers rather than a renderer command, so MAP does not wire

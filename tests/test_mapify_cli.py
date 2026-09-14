@@ -5329,7 +5329,6 @@ class TestCodexProvider:
             "end-of-turn.sh",
             "map-memory-capture.py",
             "map-memory-endmark.py",
-            "map-memory-finalize.py",
             "map-memory-recall.py",
             "map-memory-session.py",
             "map-stop.py",
@@ -5882,36 +5881,16 @@ class TestCodexProvider:
         output = json.loads(proc.stdout)["hookSpecificOutput"]
         assert output["permissionDecision"] == "deny"
 
-    @pytest.mark.parametrize(
-        "command",
-        [
-            "sed -i s/old/new/ src.py",
-            "sed --in-place s/old/new/ src.py",
-            "sed --in-place=.bak s/old/new/ src.py",
-            "git diff --output=src.py",
-            "git diff --output src.py",
-            'python3 -c "from pathlib import Path; Path(\'src.py\').write_text(\'x\')"',
-            'python3 -c "open(\'src.py\', \'w\').write(\'x\')" > /tmp/map-safe.txt',
-            'ruby -e "File.write(\'src.py\', \'x\')" > /tmp/map-safe.txt',
-            'printf safe > /tmp/map-safe.txt; python3 -c "from pathlib import Path; Path(\'src.py\').write_text(\'x\')"',
-            'echo "$(touch src.py)"',
-            "echo `touch src.py`",
-            'VALUE="$(touch src.py)" printf safe',
-            "cat <(touch src.py)",
-            "echo safe 3>src.py",
-        ],
-    )
-    def test_ac20d2_unknown_bash_mutations_fail_closed(
-        self, codex_project, command
-    ):
-        """In-place tools and interpreter code cannot bypass RESEARCH."""
+    @staticmethod
+    def _run_codex_gate(codex_project, command: str, phase: str = "RESEARCH") -> str:
+        """Run the Codex gate for a Bash *command* in *phase*; return the decision."""
         branch_dir = codex_project / ".map" / "default"
         branch_dir.mkdir(parents=True, exist_ok=True)
         (branch_dir / "step_state.json").write_text(
-            json.dumps({"current_step_phase": "RESEARCH"}), encoding="utf-8"
+            json.dumps({"current_step_phase": phase, "current_subtask_id": "ST-1"}),
+            encoding="utf-8",
         )
         hook = codex_project / ".codex" / "hooks" / "workflow-gate.py"
-
         proc = subprocess.run(
             [sys.executable, str(hook)],
             input=json.dumps(
@@ -5927,11 +5906,76 @@ class TestCodexProvider:
             env={**os.environ, "CLAUDE_PROJECT_DIR": str(codex_project)},
             check=False,
         )
-
         assert proc.returncode == 0
-        assert json.loads(proc.stdout)["hookSpecificOutput"][
-            "permissionDecision"
-        ] == "deny"
+        output = json.loads(proc.stdout).get("hookSpecificOutput", {})
+        return output.get("permissionDecision", "allow")
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "sed -i s/old/new/ src.py",
+            "sed --in-place s/old/new/ src.py",
+            "sed --in-place=.bak s/old/new/ src.py",
+            "git diff --output=src.py",
+            "git diff --output src.py",
+            "echo safe 3>src.py",
+            "tee src.py < /dev/null",
+            "cp /tmp/x src.py",
+            "sort -o src.py src.py",
+            # A newline separates commands like `;` does: a mutating second
+            # line cannot hide behind a harmless first line.
+            "echo hi\nsed -i s/old/new/ src.py",
+            "ls\ncat > src.py <<'EOF'\nx\nEOF",
+            "echo hi\ntee src.py",
+            "true\nprintf x >> src.py",
+        ],
+    )
+    def test_ac20d2_explicit_bash_targets_are_phase_gated(
+        self, codex_project, command
+    ):
+        """Every explicit write target, on any line, goes through the phase gate."""
+        assert self._run_codex_gate(codex_project, command) == "deny"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            # The orchestrator's own commands, verbatim from the shipped skills.
+            "SUBTASK_ID=$(jq -r '.current_subtask_id' \".map/default/step_state.json\")",
+            "NEXT_STEP=$(python3 .map/scripts/map_orchestrator.py get_next_step)",
+            "MAP_CONTEXT=$(python3 .map/scripts/map_step_runner.py build_context_block \"$BRANCH\" \"$SUBTASK_ID\")",
+            "TEST_OUTPUT=$(pytest --tb=short 2>&1) || true",
+            "TEST_OUTPUT=$(go test ./... 2>&1) || true",
+            "pytest -q",
+            "make test 2>/dev/null",
+            "date -u +%Y-%m-%dT%H:%M:%SZ",
+            "printf '%s' \"$RESEARCH_FINDINGS\" | python3 .map/scripts/map_step_runner.py save_research \"$BRANCH\" \"$SUBTASK_ID\"",
+            # Writes into .map/ (exempt) and outside the repo (orthogonal).
+            "printf x > .map/default/notes.md",
+            "printf x > /tmp/map-safe.txt",
+            "python3 -c \"open('src.py', 'w').write('x')\" > /tmp/map-safe.txt",
+        ],
+    )
+    @pytest.mark.parametrize("phase", ["RESEARCH", "DECOMPOSE", "TEST_FAIL_GATE"])
+    def test_ac20d3_orchestrator_bash_is_allowed_in_every_phase(
+        self, codex_project, command, phase
+    ):
+        """The gate must never deny the workflow's own commands (deadlock)."""
+        assert self._run_codex_gate(codex_project, command, phase) == "allow"
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            'python3 -c "open(\'src.py\', \'w\').write(\'x\')"',
+            'ruby -e "File.write(\'src.py\', \'x\')"',
+            'echo "$(touch src.py)"',
+            "cat <(touch src.py)",
+        ],
+    )
+    def test_ac20d4_opaque_bash_is_not_gated_like_claude_twin(
+        self, codex_project, command
+    ):
+        """No extractable target => not gated (documented #164 parity with Claude)."""
+        assert self._run_codex_gate(codex_project, command) == "allow"
 
     def test_ac20e_configured_hook_command_runs_without_git(self, codex_project):
         """The exact installed command falls back to cwd in a --no-git project."""

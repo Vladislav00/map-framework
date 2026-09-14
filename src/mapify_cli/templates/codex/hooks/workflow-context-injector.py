@@ -51,6 +51,32 @@ from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
 
+# --- shared: Codex apply_patch target extraction (rendered from
+# templates_src/_partials/apply-patch-paths.py.jinja; edit the partial) ---
+_APPLY_PATCH_HEADER_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$", re.MULTILINE
+)
+_APPLY_PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def extract_apply_patch_paths(payload: object) -> list[str]:
+    """Return the file targets named by explicit Codex apply_patch headers.
+
+    Accepts the raw patch text or the tool_input mapping Codex hands to hooks
+    (patch text under ``command``, ``input`` or ``patch``). Only explicit
+    ``*** Add/Update/Delete File:`` and ``*** Move to:`` headers count; paths
+    are never inferred from added or removed content. Order is preserved and
+    duplicates are dropped.
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("command") or payload.get("input") or payload.get("patch")
+    if not isinstance(payload, str):
+        return []
+    paths = [m.group(1).strip() for m in _APPLY_PATCH_HEADER_RE.finditer(payload)]
+    paths += [m.group(1).strip() for m in _APPLY_PATCH_MOVE_RE.finditer(payload)]
+    return list(dict.fromkeys(p for p in paths if p))
+
+
 # Keep in sync with map_step_runner.py GOAL_HEADING_RE
 GOAL_HEADING_RE = r"## (?:Goal|Overview)\n(.*?)(?=\n##|\Z)"
 REMINDER_LIMIT = 700
@@ -820,15 +846,7 @@ def _extract_target_file(tool_name: str, tool_input: dict) -> str:
         if isinstance(file_path, str) and file_path.strip():
             return file_path.strip()
     if tool_name == "apply_patch":
-        command = tool_input.get("command", "")
-        if isinstance(command, str):
-            match = re.search(
-                r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$",
-                command,
-                re.MULTILINE,
-            )
-            if match:
-                return match.group(1).strip()
+        return next(iter(extract_apply_patch_paths(tool_input)), "")
     return ""
 
 

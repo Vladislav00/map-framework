@@ -309,6 +309,55 @@ class TestVC3SecurityRedaction:
             "src/main.py",
         ]
 
+    def test_vc3_codex_rollout_custom_tool_call_is_captured(
+        self, tmp_path: Path
+    ) -> None:
+        """Real Codex rollouts store apply_patch as custom_tool_call with a STRING input.
+
+        Shape taken from ~/.codex/sessions rollout-*.jsonl (codex-cli 0.15x):
+        ``response_item`` / ``custom_tool_call`` / ``name: apply_patch`` /
+        ``input: "*** Begin Patch..."``; ``function_call`` items carry a JSON
+        string in ``arguments`` instead.
+        """
+        _make_fake_git(tmp_path)
+        transcript = tmp_path / "rollout.jsonl"
+        lines = [
+            {
+                "timestamp": "2026-09-14T15:00:02Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "custom_tool_call",
+                    "id": "ct_1",
+                    "status": "completed",
+                    "call_id": "call_1",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** Update File: src/parser.py\n*** End Patch",
+                },
+            },
+            {
+                "timestamp": "2026-09-14T15:00:03Z",
+                "type": "response_item",
+                "payload": {
+                    "type": "function_call",
+                    "name": "apply_patch",
+                    "arguments": json.dumps(
+                        {"input": "*** Begin Patch\n*** Add File: tests/test_parser.py\n*** End Patch"}
+                    ),
+                    "call_id": "call_2",
+                },
+            },
+        ]
+        transcript.write_text(
+            "".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8"
+        )
+        append_turn(
+            {"session_id": "s1", "transcript_path": str(transcript)}, tmp_path
+        )
+
+        scratch = _scratch_dir(tmp_path)
+        record = _read_jsonl(next(iter(scratch.glob("*.jsonl"))))[0]
+        assert record["files_touched"] == ["src/parser.py", "tests/test_parser.py"]
+
     def test_vc3_codex_transcript_file_change_is_captured(
         self, tmp_path: Path
     ) -> None:

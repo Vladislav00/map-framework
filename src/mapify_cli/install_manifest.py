@@ -86,6 +86,7 @@ _CLAUDE_SINGLE_FILES: list[str] = [
 ]
 
 _CODEX_SCAN_ROOTS: list[str] = [
+    ".agents/references",
     ".agents/skills",
     ".codex/agents",
     ".codex/hooks",

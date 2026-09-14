@@ -1093,7 +1093,8 @@ class TestRenderRepoTreesCodex:
 
         codex_gate = provider_pairs[1][0].read_text(encoding="utf-8")
         assert '"apply_patch"' in codex_gate
-        assert "def is_read_only_bash" in codex_gate
+        assert "def has_unresolved_shell_target" in codex_gate
+        assert "def _bash_write_targets" in codex_gate
 
     @_skip_no_codex_templates_src
     def test_vc3_workflow_gate_no_recursion_guard(self) -> None:
