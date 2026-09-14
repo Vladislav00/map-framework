@@ -31,6 +31,8 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+from mapify_cli.codex_exec import codex_exec_argv, parse_codex_exec_events
+from mapify_cli.provider_registry import require_provider
 from mapify_cli.skills_eval.eval_schema import DispatchResult
 from mapify_cli.token_budget import TokenUsage
 
@@ -791,37 +793,21 @@ def _instrument_codex_skills(agents_dir: Path) -> None:
 
 
 def _parse_codex_jsonl(stdout: str) -> tuple[str, TokenUsage | None, str | None]:
-    """Parse documented Codex exec events and the eval-only response marker."""
-    raw_output = ""
-    token_usage: TokenUsage | None = None
+    """Parse ``codex exec --json`` events plus the eval-only response marker."""
+    parsed = parse_codex_exec_events(stdout)
+    raw_output = parsed.response
     triggered_skill: str | None = None
-    for raw_line in stdout.splitlines():
-        try:
-            event = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") == "item.completed":
-            item = event.get("item")
-            if isinstance(item, dict) and item.get("type") == "agent_message":
-                text = item.get("text")
-                if isinstance(text, str):
-                    raw_output = text
-                    marker = _CODEX_SKILL_MARKER_RE.search(text)
-                    if marker is not None:
-                        triggered_skill = marker.group(1).removeprefix("$")
-                        raw_output = _CODEX_SKILL_MARKER_RE.sub("", text).rstrip()
-        elif event.get("type") == "turn.completed":
-            usage = event.get("usage")
-            if isinstance(usage, dict):
-                total_input = int(usage.get("input_tokens", 0) or 0)
-                cached_input = int(usage.get("cached_input_tokens", 0) or 0)
-                token_usage = TokenUsage(
-                    input_tokens=max(0, total_input - cached_input),
-                    cache_read_input_tokens=max(0, cached_input),
-                    cache_creation_input_tokens=0,
-                )
+    marker = _CODEX_SKILL_MARKER_RE.search(raw_output)
+    if marker is not None:
+        triggered_skill = marker.group(1)
+        raw_output = _CODEX_SKILL_MARKER_RE.sub("", raw_output).rstrip()
+    token_usage: TokenUsage | None = None
+    if parsed.usage:
+        token_usage = TokenUsage(
+            input_tokens=parsed.usage["input_tokens"],
+            cache_read_input_tokens=parsed.usage["cache_read_input_tokens"],
+            cache_creation_input_tokens=parsed.usage["cache_creation_input_tokens"],
+        )
     return raw_output, token_usage, triggered_skill
 
 
@@ -861,20 +847,7 @@ class CodexSubprocessDispatcher(VariantDispatcher):
             _instrument_codex_skills(tmp / ".agents")
             (tmp / ".map").mkdir()
 
-            argv = [
-                "codex",
-                "exec",
-                "--json",
-                "--sandbox",
-                "read-only",
-                "--ephemeral",
-                "--ignore-user-config",
-                "--ignore-rules",
-                "--skip-git-repo-check",
-            ]
-            if self._model:
-                argv.extend(["--model", self._model])
-            argv.append("-")
+            argv = codex_exec_argv(model=self._model)
             last_error = ""
             for attempt in range(self._max_retries + 1):
                 if attempt:
@@ -930,3 +903,10 @@ class CodexSubprocessDispatcher(VariantDispatcher):
             )
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+def dispatcher_for(provider: str, *, model: str | None = None) -> VariantDispatcher:
+    """Production dispatcher for *provider* (the only place that maps the two)."""
+    if require_provider(provider) == "codex":
+        return CodexSubprocessDispatcher(model=model)
+    return ClaudeSubprocessDispatcher(model=model)

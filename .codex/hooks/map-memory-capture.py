@@ -27,6 +27,7 @@ if sys.version_info < (3, 11):  # noqa: UP036
     sys.stderr.write(_MAP_PYTHON_PROBLEM)
     sys.exit(1)
 
+import importlib.util
 import json
 import os
 import shutil
@@ -43,6 +44,24 @@ def _silent() -> None:
     sys.stdout.write("{}")
 
 
+def _mapify_runtime() -> list[str] | None:
+    """Command prefix that runs the installed mapify CLI, or None when absent.
+
+    Resolution: ``$MAPIFY_CLI`` (explicit), then ``mapify`` on PATH, then the
+    ``mapify_cli`` package importable by this interpreter (``python -m``).
+    Memory hooks are best effort: with none of these the hook stays silent.
+    """
+    explicit = os.environ.get("MAPIFY_CLI")
+    if explicit:
+        return [explicit]
+    on_path = shutil.which("mapify")
+    if on_path:
+        return [on_path]
+    if importlib.util.find_spec("mapify_cli") is not None:
+        return [sys.executable, "-m", "mapify_cli"]
+    return None
+
+
 def main() -> None:
     if os.environ.get("MAP_INVOKED_BY"):
         return
@@ -56,8 +75,8 @@ def main() -> None:
         _silent()
         return
 
-    executable = os.environ.get("MAPIFY_CLI") or shutil.which("mapify")
-    if not executable:
+    runtime = _mapify_runtime()
+    if runtime is None:
         _silent()
         return
     timeout = {
@@ -70,7 +89,7 @@ def main() -> None:
     try:
         proc = subprocess.run(
             [
-                executable,
+                *runtime,
                 "_memory-hook",
                 ACTION,
                 "--project",

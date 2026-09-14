@@ -19,6 +19,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from mapify_cli.provider_registry import SUPPORTED_PROVIDERS
+
 if os.name == "nt":
     msvcrt: Any = importlib.import_module("msvcrt")
 else:
@@ -41,7 +43,7 @@ REFRESH_RETRY_INTERVAL = timedelta(minutes=15)
 _STABLE_VERSION_RE = re.compile(
     r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 )
-_PROVIDERS = frozenset({"claude", "codex"})
+_PROVIDERS = SUPPORTED_PROVIDERS
 _V1_KEYS = frozenset(
     {
         "schema_version",

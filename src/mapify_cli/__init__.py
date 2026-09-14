@@ -139,6 +139,11 @@ from mapify_cli.delivery import (
 from mapify_cli.delivery import (
     create_task_decomposer_content as create_task_decomposer_content,
 )
+from mapify_cli.provider_registry import (
+    PROVIDER_SKILL_DIR,
+    SUPPORTED_PROVIDERS,
+    skill_dir,
+)
 
 if TYPE_CHECKING:
     from mapify_cli.install_manifest import InstallManifest
@@ -2291,111 +2296,91 @@ def _write_internal_update_failure(exc: Exception) -> None:
         pass
 
 
+_MEMORY_HOOK_ACTIONS = frozenset({"capture", "endmark", "recall", "session"})
+
+
+def _memory_finalize_timeout() -> int:
+    try:
+        return int(os.environ.get("MAP_MEMORY_FINALIZE_TIMEOUT", "50"))
+    except (TypeError, ValueError):
+        return 50
+
+
+def _memory_finalize(event: dict[str, Any], project_dir: Path, provider: str) -> None:
+    from mapify_cli.memory.capture import resolve_session_id
+    from mapify_cli.memory.finalize import finalize_dirty
+
+    finalize_dirty(
+        resolve_session_id(event, project_dir),
+        project_dir,
+        _memory_finalize_timeout(),
+        provider=provider,
+    )
+
+
+def _memory_recall_payload(
+    event: dict[str, Any], project_dir: Path, hook_event: str
+) -> str | None:
+    """Serialized additionalContext for the recall hook, or None when empty."""
+    from mapify_cli.memory.capture import _resolve_branch
+    from mapify_cli.memory.recall import build_recall
+
+    context = build_recall(
+        str(event.get("prompt", "")), _resolve_branch(project_dir), project_dir
+    )
+    if not context:
+        return None
+    return json.dumps(
+        {
+            "hookSpecificOutput": {
+                "hookEventName": hook_event,
+                "additionalContext": context,
+            }
+        }
+    )
+
+
 @app.command("_memory-hook", hidden=True)
 def internal_memory_hook(
     action: str = typer.Argument(...),
     project: Path = typer.Option(Path("."), "--project"),
     provider: str = typer.Option("claude", "--provider"),
 ) -> None:
-    """Run memory hook logic inside the installed mapify runtime."""
-    if action not in {"capture", "endmark", "finalize", "recall", "session"}:
-        sys.stdout.write("{}")
-        raise typer.Exit(0)
-    if provider not in {"claude", "codex"}:
-        sys.stdout.write("{}")
-        raise typer.Exit(0)
+    """Run memory hook logic inside the installed mapify runtime.
+
+    Actions: ``capture`` (Stop), ``endmark`` (SessionEnd), ``recall``
+    (UserPromptSubmit) and ``session`` (SessionStart = finalize prior dirty
+    scratches, then recall). Always prints a hook JSON object; best effort.
+    """
+    output = "{}"
     try:
         event = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
-        sys.stdout.write("{}")
-        raise typer.Exit(0)
-    if not isinstance(event, dict):
-        sys.stdout.write("{}")
-        raise typer.Exit(0)
+        event = None
+    if (
+        action in _MEMORY_HOOK_ACTIONS
+        and provider in SUPPORTED_PROVIDERS
+        and isinstance(event, dict)
+    ):
+        project_dir = project.resolve()
+        try:
+            if action == "capture":
+                from mapify_cli.memory.capture import append_turn
 
-    project_dir = project.resolve()
-    try:
-        if action == "capture":
-            from mapify_cli.memory.capture import append_turn
+                append_turn(event, project_dir)
+            elif action == "endmark":
+                from mapify_cli.memory.capture import on_session_end
 
-            append_turn(event, project_dir)
-        elif action == "endmark":
-            from mapify_cli.memory.capture import on_session_end
-
-            on_session_end(event, project_dir)
-        elif action == "finalize":
-            from mapify_cli.memory.capture import resolve_session_id
-            from mapify_cli.memory.finalize import finalize_dirty
-
-            try:
-                timeout = int(os.environ.get("MAP_MEMORY_FINALIZE_TIMEOUT", "50"))
-            except (TypeError, ValueError):
-                timeout = 50
-            finalize_dirty(
-                resolve_session_id(event, project_dir),
-                project_dir,
-                timeout,
-                provider=provider,
-            )
-        elif action == "recall":
-            from mapify_cli.memory.capture import _resolve_branch
-            from mapify_cli.memory.recall import build_recall
-
-            context = build_recall(
-                str(event.get("prompt", "")),
-                _resolve_branch(project_dir),
-                project_dir,
-            )
-            if context:
-                hook_event = event.get("hook_event_name") or "SessionStart"
-                sys.stdout.write(
-                    json.dumps(
-                        {
-                            "hookSpecificOutput": {
-                                "hookEventName": hook_event,
-                                "additionalContext": context,
-                            }
-                        }
-                    )
-                )
-                raise typer.Exit(0)
-        else:
-            from mapify_cli.memory.capture import _resolve_branch, resolve_session_id
-            from mapify_cli.memory.finalize import finalize_dirty
-            from mapify_cli.memory.recall import build_recall
-
-            try:
-                timeout = int(os.environ.get("MAP_MEMORY_FINALIZE_TIMEOUT", "50"))
-            except (TypeError, ValueError):
-                timeout = 50
-            finalize_dirty(
-                resolve_session_id(event, project_dir),
-                project_dir,
-                timeout,
-                provider=provider,
-            )
-            context = build_recall(
-                str(event.get("prompt", "")),
-                _resolve_branch(project_dir),
-                project_dir,
-            )
-            if context:
-                sys.stdout.write(
-                    json.dumps(
-                        {
-                            "hookSpecificOutput": {
-                                "hookEventName": "SessionStart",
-                                "additionalContext": context,
-                            }
-                        }
-                    )
-                )
-                raise typer.Exit(0)
-    except typer.Exit:
-        raise
-    except Exception:  # noqa: BLE001, S110 -- memory hooks are best effort
-        pass
-    sys.stdout.write("{}")
+                on_session_end(event, project_dir)
+            elif action == "recall":
+                hook_event = str(event.get("hook_event_name") or "SessionStart")
+                output = _memory_recall_payload(event, project_dir, hook_event) or output
+            else:  # session: finalize, then recall, in one process
+                _memory_finalize(event, project_dir, provider)
+                output = _memory_recall_payload(event, project_dir, "SessionStart") or output
+        except Exception:  # noqa: BLE001, S110 -- memory hooks are best effort
+            pass
+    sys.stdout.write(output)
 
 
 @app.command("_update", hidden=True)
@@ -3647,10 +3632,7 @@ def skill_eval_run(
 
     import mapify_cli.skills_eval.aggregator as _aggregator
     import mapify_cli.skills_eval.runner as _runner
-    from mapify_cli.skills_eval.dispatcher import (
-        ClaudeSubprocessDispatcher,
-        CodexSubprocessDispatcher,
-    )
+    from mapify_cli.skills_eval.dispatcher import dispatcher_for
     from mapify_cli.skills_eval.eval_schema import EvalResultRecord
 
     # SC-2: --eval-set is required.
@@ -3665,8 +3647,11 @@ def skill_eval_run(
         console.print(f"[bold red]Error:[/bold red] {exc}")
         raise typer.Exit(2)
 
-    if provider not in {"claude", "codex"}:
-        console.print("[bold red]Error:[/bold red] --provider must be claude or codex")
+    if provider not in SUPPORTED_PROVIDERS:
+        console.print(
+            "[bold red]Error:[/bold red] --provider must be one of "
+            f"{', '.join(sorted(SUPPORTED_PROVIDERS))}"
+        )
         raise typer.Exit(2)
 
     # Dry-run path: zero quota, NO dispatcher construction, NO claude required.
@@ -3679,7 +3664,8 @@ def skill_eval_run(
         )
         raise typer.Exit(0)
 
-    # HC-6: require the selected provider BEFORE any invocation.
+    # Fail before any dispatch: a missing provider CLI must cost zero quota and
+    # leave no partial run file behind.
     if shutil.which(provider) is None:
         console.print(
             f"[bold red]Error:[/bold red] requires-cmd: {provider} — "
@@ -3710,11 +3696,7 @@ def skill_eval_run(
         )
 
     # Run the evaluation matrix.
-    disp = (
-        CodexSubprocessDispatcher(model=model)
-        if provider == "codex"
-        else ClaudeSubprocessDispatcher(model=model)
-    )
+    disp = dispatcher_for(provider, model=model)
     _aggregator.bounded_run(
         skill=skill,
         entries=entries,
@@ -3849,8 +3831,7 @@ def _open_best_effort(path: Path) -> None:
 
 def _read_skill_description(root: Path, skill: str, provider: str = "claude") -> str:
     """Return the description: field from SKILL.md frontmatter, or '' on any failure."""
-    skill_root = root / (".agents" if provider == "codex" else ".claude") / "skills"
-    skill_md = skill_root / skill / "SKILL.md"
+    skill_md = skill_dir(root, provider) / skill / "SKILL.md"
     if not skill_md.exists():
         return ""
     try:
@@ -3918,8 +3899,11 @@ def skill_eval_optimize(
         console.print("[bold red]Error:[/bold red] provide --eval-set PATH")
         raise typer.Exit(2)
 
-    if provider not in {"claude", "codex"}:
-        console.print("[bold red]Error:[/bold red] --provider must be claude or codex")
+    if provider not in SUPPORTED_PROVIDERS:
+        console.print(
+            "[bold red]Error:[/bold red] --provider must be one of "
+            f"{', '.join(sorted(SUPPORTED_PROVIDERS))}"
+        )
         raise typer.Exit(2)
 
     # 2. Load and validate eval-set.
@@ -3978,14 +3962,12 @@ def skill_eval_optimize(
     current_description = _read_skill_description(root, skill, provider)
 
     dispatcher_factory_fn = None
-    source_provider_dir = root / ".claude"
-    provider_dir_name = ".claude"
+    provider_dir_name = PROVIDER_SKILL_DIR[provider]
+    source_provider_dir = root / provider_dir_name
     proposer = _proposer.propose_description
     if provider == "codex":
         from mapify_cli.skills_eval.dispatcher import CodexSubprocessDispatcher
 
-        source_provider_dir = root / ".agents"
-        provider_dir_name = ".agents"
         proposer = _proposer.propose_description_codex
 
         def _codex_dispatcher_factory(

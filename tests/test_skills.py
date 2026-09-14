@@ -61,6 +61,8 @@ SUPPORTED_SKILL_CLASSES = {"reference", "task", "hybrid"}
 # Its manual-only scope is enforced by disable-model-invocation + skill-rules,
 # so the generic Claude negative-trigger convention does not apply here.
 NEGATIVE_TRIGGER_DESCRIPTION_EXEMPT_SKILLS = {"map-upgrade"}
+# Codex twins rendered from the Claude source via [% include %] (PROVIDER-conditional).
+SINGLE_SOURCE_CODEX_SKILLS = {"map-architecture", "map-auto"}
 
 WORKFLOW_EFFORT_PROFILES = {
     "map-fast": "low/direct",
@@ -343,6 +345,16 @@ class TestProviderUpdateSkills:
 
         for skill_name, source in sources.items():
             content = source.read_text(encoding="utf-8")
+            if (
+                skill_name in SINGLE_SOURCE_CODEX_SKILLS
+                and relative_root == Path("codex/skills")
+            ):
+                # A pure include of the Claude source; the rendered-output test
+                # below still proves the preflight lands once, first.
+                assert content.strip() == (
+                    f'[% include "skills/{skill_name}/SKILL.md.jinja" %]'
+                )
+                continue
             assert content.count(AUTO_UPDATE_PREFLIGHT_INCLUDE) == 1, skill_name
             _, separator, body = content.partition("\n---\n")
             assert separator, f"{source} has no closing frontmatter"
@@ -443,6 +455,7 @@ class TestProviderUpdateSkills:
         codex_body = codex.read_text(encoding="utf-8").partition("\n---\n")[2]
         assert claude_body == codex_body
         assert claude_body.endswith("\n")
+
         assert not claude_body.endswith("\n\n")
         assert claude_body.count("## Manual MAP upgrade flow") == 1
         assert "`mapify _update --mode automatic --project .`" not in claude_body
@@ -463,6 +476,33 @@ class TestProviderUpdateSkills:
         assert "ignore any output or failure" in claude_body
         assert "re-read this installed `SKILL.md`" in claude_body
         assert "Do not claim success" in claude_body
+
+
+    @pytest.mark.parametrize("skill", sorted(SINGLE_SOURCE_CODEX_SKILLS))
+    def test_codex_twin_is_rendered_from_claude_source(
+        self, project_root: Path, skill: str
+    ) -> None:
+        """Zero-delta twins are an include, so they cannot silently re-fork."""
+        templates_src = project_root / "src/mapify_cli/templates_src"
+        twin = templates_src / "codex/skills" / skill / "SKILL.md.jinja"
+        assert twin.read_text(encoding="utf-8").strip() == (
+            f'[% include "skills/{skill}/SKILL.md.jinja" %]'
+        )
+        source = (templates_src / "skills" / skill / "SKILL.md.jinja").read_text(
+            encoding="utf-8"
+        )
+        assert source.startswith('---\n[% set cmd = "/" if PROVIDER == "claude" else "$" -%]\n')
+        assert "/map-" not in source, "use <% cmd %>map- so both providers render"
+
+        claude = project_root / ".claude/skills" / skill / "SKILL.md"
+        codex = project_root / ".agents/skills" / skill / "SKILL.md"
+        claude_text = claude.read_text(encoding="utf-8")
+        codex_text = codex.read_text(encoding="utf-8")
+        assert "$map-" not in claude_text and "/map-" in claude_text
+        assert "/map-" not in codex_text and "$map-" in codex_text
+        for key in ("effort:", "disable-model-invocation:", "argument-hint:"):
+            assert key in claude_text.partition("\n---\n")[0]
+            assert key not in codex_text.partition("\n---\n")[0]
 
     def test_map_upgrade_catalog_entry_is_manual_task(self, project_root: Path) -> None:
         rules = json.loads(

@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 
+from mapify_cli.codex_exec import codex_exec_argv, parse_codex_exec_events
 from mapify_cli.skills_eval.eval_schema import EvalResultRecord
 
 # Default subprocess timeout in seconds.
@@ -163,24 +164,10 @@ def propose_description_codex(
     max_chars: int = _DEFAULT_MAX_CHARS,
 ) -> str | None:
     """Propose a description through ``codex exec --json``."""
-    from mapify_cli.skills_eval.dispatcher import _parse_codex_jsonl
-
     prompt = _build_prompt(current_description, failing_train_records, max_chars)
-    argv = [
-        "codex",
-        "exec",
-        "--json",
-        "--sandbox",
-        "read-only",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--skip-git-repo-check",
-        "-",
-    ]
     try:
         proc = subprocess.run(
-            argv,
+            codex_exec_argv(),
             input=prompt,
             capture_output=True,
             text=True,
@@ -195,8 +182,7 @@ def propose_description_codex(
         return None
     if proc.returncode != 0:
         return None
-    raw, _, _ = _parse_codex_jsonl(proc.stdout or "")
-    candidate = raw.strip()
+    candidate = parse_codex_exec_events(proc.stdout or "").response.strip()
     if not candidate or len(candidate) > max_chars:
         return None
     return candidate

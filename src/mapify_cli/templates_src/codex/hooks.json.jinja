@@ -1,28 +1,35 @@
+[#- One launcher string for every MAP hook: the repo root is resolved at run
+    time so the registration survives a clone move, and CLAUDE_PROJECT_DIR is
+    the env contract every hook script reads. -#]
+[%- set root = "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" -%]
+[%- macro hook(script, timeout, status=None, ctx_limit=None, env="") -%]
+{"type": "command", "command": "CLAUDE_PROJECT_DIR=\"<% root %>\" <% env %>python3 \"<% root %>/.codex/hooks/<% script %>\"", "timeout": <% timeout %>[% if status %], "statusMessage": "<% status %>"[% endif %][% if ctx_limit %], "additionalContextLimit": <% ctx_limit %>[% endif %]}
+[%- endmacro -%]
 {
   "hooks": {
     "SessionStart": [
-      {"hooks": [{"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" MAP_PROVIDER=codex python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/map-memory-session.py\"", "timeout": 60, "statusMessage": "Loading MAP memory", "additionalContextLimit": 5000}]},
-      {"matcher": "compact", "hooks": [{"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/post-compact-context.py\"", "timeout": 5, "additionalContextLimit": 5000}]}
+      {"hooks": [<% hook("map-memory-session.py", 60, "Loading MAP memory", 5000, env="MAP_PROVIDER=codex ") %>]},
+      {"matcher": "compact", "hooks": [<% hook("post-compact-context.py", 5, ctx_limit=5000) %>]}
     ],
-    "SessionEnd": [{"hooks": [{"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/map-memory-endmark.py\"", "timeout": 3}]}],
+    "SessionEnd": [{"hooks": [<% hook("map-memory-endmark.py", 3) %>]}],
     "PreToolUse": [
       {"matcher": "Bash|apply_patch", "hooks": [
-        {"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/safety-guardrails.py\"", "timeout": 5, "statusMessage": "Checking MAP safety policy"},
-        {"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/workflow-context-injector.py\"", "timeout": 3, "additionalContextLimit": 5000},
-        {"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/workflow-gate.py\"", "timeout": 5, "statusMessage": "Checking MAP workflow phase"}
+        <% hook("safety-guardrails.py", 5, "Checking MAP safety policy") %>,
+        <% hook("workflow-context-injector.py", 3, ctx_limit=5000) %>,
+        <% hook("workflow-gate.py", 5, "Checking MAP workflow phase") %>
       ]}
     ],
-    "PostToolUse": [{"matcher": "Bash|apply_patch", "hooks": [{"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/ralph-iteration-logger.py\"", "timeout": 5}]}],
+    "PostToolUse": [{"matcher": "Bash|apply_patch", "hooks": [<% hook("ralph-iteration-logger.py", 5) %>]}],
     "PreCompact": [{"matcher": "manual|auto", "hooks": [
-      {"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/ralph-context-pruner.py\"", "timeout": 10},
-      {"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/pre-compact-save-transcript.py\"", "timeout": 30}
+      <% hook("ralph-context-pruner.py", 10) %>,
+      <% hook("pre-compact-save-transcript.py", 30) %>
     ]}],
-    "SubagentStop": [{"hooks": [{"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/map-token-meter.py\"", "timeout": 5}]}],
-    "Stop": [{"hooks": [{"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/map-stop.py\"", "timeout": 165, "statusMessage": "Running MAP end-of-turn checks"}]}],
+    "SubagentStop": [{"hooks": [<% hook("map-token-meter.py", 5) %>]}],
+    "Stop": [{"hooks": [<% hook("map-stop.py", 165, "Running MAP end-of-turn checks") %>]}],
     "UserPromptSubmit": [{"hooks": [
-      {"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/detect-clarification-triggers.py\"", "timeout": 3, "additionalContextLimit": 5000},
-      {"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/context-meter.py\"", "timeout": 5, "additionalContextLimit": 5000},
-      {"type": "command", "command": "CLAUDE_PROJECT_DIR=\"$(git rev-parse --show-toplevel 2>/dev/null || pwd)\" python3 \"$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.codex/hooks/map-memory-recall.py\"", "timeout": 10, "additionalContextLimit": 5000}
+      <% hook("detect-clarification-triggers.py", 3, ctx_limit=5000) %>,
+      <% hook("context-meter.py", 5, ctx_limit=5000) %>,
+      <% hook("map-memory-recall.py", 10, ctx_limit=5000) %>
     ]}]
   }
 }

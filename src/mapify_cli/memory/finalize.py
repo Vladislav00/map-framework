@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from mapify_cli._locking import LockState, LockTimeoutError, flock_with_state
+from mapify_cli.codex_exec import codex_exec_argv, parse_codex_exec_events
 from mapify_cli.memory.capture import _resolve_branch
 from mapify_cli.memory.digest_schema import (
     DIGEST_FRONTMATTER_FIELDS,
@@ -40,6 +41,7 @@ from mapify_cli.memory.digest_schema import (
     redact_text,
     sanitize_value,
 )
+from mapify_cli.provider_registry import require_provider
 from mapify_cli.token_budget import TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -275,42 +277,14 @@ def _parse_codex_output(
 ) -> tuple[str, str, list[object], list[object], dict[str, Any]]:
     """Parse ``codex exec --json`` JSONL into digest fields and usage.
 
-    Codex streams events rather than returning Claude's single JSON envelope.
     The last completed ``agent_message`` is the response; ``turn.completed``
-    carries token usage. Unknown event types are ignored for forward
-    compatibility.
+    carries token usage (see :mod:`mapify_cli.codex_exec`).
     """
-    response = ""
-    usage: dict[str, Any] = {}
-    for raw_line in stdout.splitlines():
-        try:
-            event = json.loads(raw_line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") == "item.completed":
-            item = event.get("item")
-            if isinstance(item, dict) and item.get("type") == "agent_message":
-                text = item.get("text")
-                if isinstance(text, str):
-                    response = text
-        elif event.get("type") == "turn.completed":
-            raw_usage = event.get("usage")
-            if isinstance(raw_usage, dict):
-                total_input = int(raw_usage.get("input_tokens", 0) or 0)
-                cached_input = int(raw_usage.get("cached_input_tokens", 0) or 0)
-                usage = {
-                    "input_tokens": max(0, total_input - cached_input),
-                    "cache_read_input_tokens": max(0, cached_input),
-                    "cache_creation_input_tokens": 0,
-                    "output_tokens": raw_usage.get("output_tokens", 0),
-                }
-
-    if not response:
+    parsed = parse_codex_exec_events(stdout)
+    if not parsed.response:
         raise ValueError("codex exec produced no completed agent message")
     try:
-        inner = json.loads(_strip_code_fence(response))
+        inner = json.loads(_strip_code_fence(parsed.response))
     except (json.JSONDecodeError, TypeError) as exc:
         raise ValueError("codex agent message is not valid digest JSON") from exc
     if not isinstance(inner, dict):
@@ -330,7 +304,7 @@ def _parse_codex_output(
         body_value or title_value,
         decisions_value,
         findings_value,
-        usage,
+        dict(parsed.usage),
     )
 
 
@@ -459,17 +433,7 @@ def _finalize_one(
 
             # ---- Invoke the selected provider non-interactively ---------------
             argv = (
-                [
-                    "codex",
-                    "exec",
-                    "--json",
-                    "--sandbox",
-                    "read-only",
-                    "--ephemeral",
-                    "--ignore-user-config",
-                    "--ignore-rules",
-                    "-",
-                ]
+                codex_exec_argv()
                 if provider == "codex"
                 else ["claude", "-p", "--output-format", "json"]
             )
@@ -695,8 +659,7 @@ def finalize_dirty(
         Number of digests written (empty scratches are finalized but not
         counted).
     """
-    if provider not in {"claude", "codex"}:
-        raise ValueError(f"unsupported memory finalization provider: {provider}")
+    require_provider(provider)
 
     project_dir = Path(project_dir)
     branch = _resolve_branch(project_dir)

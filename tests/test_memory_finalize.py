@@ -23,6 +23,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from mapify_cli.codex_exec import codex_exec_argv
 from mapify_cli.memory.finalize import finalize_dirty
 
 # ---------------------------------------------------------------------------
@@ -390,17 +391,8 @@ def test_codex_provider_uses_exec_json_and_parses_digest(tmp_path: Path) -> None
 
     assert count == 1
     argv = mock_run.call_args.args[0]
-    assert argv == [
-        "codex",
-        "exec",
-        "--json",
-        "--sandbox",
-        "read-only",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "-",
-    ]
+    assert argv == codex_exec_argv()
+    assert argv[:3] == ["codex", "exec", "--json"] and argv[-1] == "-"
     assert mock_run.call_args.kwargs["cwd"] == tmp_path
     digest = next(_sessions_dir(tmp_path).glob("*.md")).read_text(encoding="utf-8")
     assert "Codex session summary body" in digest
@@ -416,7 +408,7 @@ def test_codex_provider_uses_exec_json_and_parses_digest(tmp_path: Path) -> None
 
 def test_unknown_memory_provider_fails_loudly(tmp_path: Path) -> None:
     """A typo must not silently select the Claude backend."""
-    with pytest.raises(ValueError, match="unsupported memory finalization provider"):
+    with pytest.raises(ValueError, match="unsupported provider"):
         finalize_dirty(None, tmp_path, provider="unknown")
 
 

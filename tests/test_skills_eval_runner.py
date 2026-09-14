@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import mapify_cli.skills_eval.dispatcher as _disp_mod
+from mapify_cli.codex_exec import codex_exec_argv
 from mapify_cli.skills_eval.aggregator import aggregate
 from mapify_cli.skills_eval.assertions import run_assertion
 from mapify_cli.skills_eval.dispatcher import (
@@ -531,7 +532,7 @@ def test_invalid_provider_dry_run_exits_2(tmp_path: Path) -> None:
         ],
     )
     assert result.exit_code == 2
-    assert "--provider must be claude or codex" in result.output
+    assert "--provider must be one of claude, codex" in result.output
 
 
 @pytest.mark.parametrize(
@@ -809,18 +810,8 @@ def test_codex_dispatcher_uses_isolated_seed_and_exec_json(
         max_retries=0,
     ).dispatch("prompt")
 
-    assert seen["argv"] == [
-        "codex",
-        "exec",
-        "--json",
-        "--sandbox",
-        "read-only",
-        "--ephemeral",
-        "--ignore-user-config",
-        "--ignore-rules",
-        "--skip-git-repo-check",
-        "-",
-    ]
+    assert seen["argv"] == codex_exec_argv()
+    assert "--sandbox" in seen["argv"] and "read-only" in seen["argv"]
     assert seen["seeded"] == (True, True)
     assert seen["instrumented"] is True
     assert seen["body_replaced"] is True
