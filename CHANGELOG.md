@@ -31,13 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `python -m mapify_cli` runs the CLI; the Codex memory hooks fall back to it when
   `mapify` is not on `PATH` (`MAPIFY_CLI` still takes precedence).
 
+- **Opt-in `strict_sensitive_names` for `safety-guardrails.py`.** With
+  `strict_sensitive_names: true` in `.map/config.yaml` the sensitive-basename
+  blocklist (`.env*`, `*credentials*`, `*secrets*`, private keys, ...) is checked
+  before the safe directories, so `src/config/secrets.yaml` or
+  `tests/fixtures/credentials.json` is denied for Read/Edit/Write and Codex
+  `apply_patch` even though `src/` and `tests/` are allowlisted. Default
+  behaviour is unchanged: a known safe directory is trusted as-is.
+
 ### Changed
-- **`safety-guardrails.py` checks sensitive basenames before the built-in safe
-  directories.** Previously a credential-looking file under a default safe prefix
-  (`src/config/secrets.yaml`, `tests/fixtures/credentials.json`) was allowed;
-  it is now denied for Read/Edit/Write and Codex `apply_patch`. An explicit
-  `safe_path_prefixes` list in `.map/config.yaml` still wins over the blocklist,
-  so projects that keep such fixtures opt in with one line.
 - `codex exec` argv and JSONL parsing live in one module
   (`mapify_cli.codex_exec`); the memory finalizer now passes
   `--skip-git-repo-check` like the skill-eval callers.

@@ -534,17 +534,16 @@ the same `safety-guardrails.py` policy hook for `Bash` and `apply_patch`; the
 autonomy-only commit/push restriction remains inactive without the Claude
 sentinel.
 
-`safety-guardrails.py` checks the sensitive-basename blocklist (`.env*`,
-`*credentials*`, `*secrets*`, private keys, ...) **before** its built-in safe
-directories, so `src/config/secrets.yaml` or `tests/fixtures/credentials.json`
-is denied for Read/Edit/Write and Codex `apply_patch` even though `src/` and
-`tests/` are safe prefixes by default. A project that keeps such fixtures opts
-in with an explicit allowlist in `.map/config.yaml` — that list wins over the
-blocklist:
+By default `safety-guardrails.py` trusts its safe directories (`src/`, `tests/`,
+`docs/`, ... or your `safe_path_prefixes`) as-is: a file there is allowed even
+if its name looks like a credential. Opt in to the stricter order — the
+sensitive-basename blocklist (`.env*`, `*credentials*`, `*secrets*`, private
+keys, ...) checked **before** the safe directories, so
+`src/config/secrets.yaml` or `tests/fixtures/credentials.json` is denied for
+Read/Edit/Write and Codex `apply_patch` — with one line in `.map/config.yaml`:
 
 ```yaml
-safe_path_prefixes:
-  - tests/fixtures/
+strict_sensitive_names: true
 ```
 
 ## Codex CLI Provider

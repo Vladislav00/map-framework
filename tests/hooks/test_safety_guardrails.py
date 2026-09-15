@@ -202,20 +202,35 @@ class TestPrivateKeys:
 
 
 class TestSafePathPrefixes:
-    """Safe directories remain allowlisted without masking sensitive names."""
+    """Safe directories are trusted as-is by default; strict mode is opt-in."""
 
     @pytest.mark.parametrize(
         "path",
         [
+            "src/config/secrets.yaml",
+            "tests/fixtures/credentials.json",
             ".claude/hooks/safety-guardrails.py",
             "src/config/settings.yaml",
-            "tests/fixtures/example.json",
         ],
     )
     def test_safe_prefix_allowed(self, path):
+        """Default: a known safe directory wins even for a sensitive basename."""
         exit_code, stdout, _ = run_hook_file("Read", path)
         assert exit_code == 0
         assert _parse_stdout(stdout) == {}
+
+    @staticmethod
+    def _run_in(project_dir: Path, tool_name: str, tool_input: dict) -> dict:
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=json.dumps({"tool_name": tool_name, "tool_input": tool_input}),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir)},
+            check=False,
+        )
+        assert result.returncode == 0
+        return _parse_stdout(result.stdout)
 
     @pytest.mark.parametrize(
         "path",
@@ -225,54 +240,29 @@ class TestSafePathPrefixes:
             "src/config/private-key.pem",
         ],
     )
-    def test_nested_sensitive_name_overrides_safe_prefix(self, path):
-        """DEFAULT prefixes never mask a sensitive basename (Write and apply_patch)."""
-        patch = (
-            "*** Begin Patch\n"
-            f"*** Update File: {path}\n"
-            "*** End Patch\n"
-        )
-        exit_code, stdout, _ = run_hook_apply_patch(patch)
-        assert exit_code == 0
-        _assert_denied(_parse_stdout(stdout))
-        exit_code, stdout, _ = run_hook_file("Write", path)
-        assert exit_code == 0
-        _assert_denied(_parse_stdout(stdout))
-
-    def test_explicit_safe_path_prefix_override_is_honoured(self, tmp_path):
-        """An operator allowlist in .map/config.yaml wins over the basename blocklist."""
+    def test_strict_sensitive_names_denies_inside_safe_prefix(self, tmp_path, path):
+        """Opt-in strict mode: the basename blocklist runs before the safe prefixes."""
         (tmp_path / ".map").mkdir()
         (tmp_path / ".map" / "config.yaml").write_text(
-            "safe_path_prefixes:\n  - tests/fixtures/\n", encoding="utf-8"
+            "strict_sensitive_names: true\n", encoding="utf-8"
         )
-        for tool in ("Write", "Read"):
-            result = subprocess.run(
-                [sys.executable, str(HOOK_PATH)],
-                input=json.dumps(
-                    {
-                        "tool_name": tool,
-                        "tool_input": {"file_path": "tests/fixtures/credentials.json"},
-                    }
-                ),
-                capture_output=True,
-                text=True,
-                env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)},
-                check=False,
-            )
-            assert result.returncode == 0
-            assert _parse_stdout(result.stdout) == {}, (tool, result.stdout)
-        # Outside the explicit allowlist the basename blocklist still applies.
-        result = subprocess.run(
-            [sys.executable, str(HOOK_PATH)],
-            input=json.dumps(
-                {"tool_name": "Write", "tool_input": {"file_path": "src/credentials.json"}}
-            ),
-            capture_output=True,
-            text=True,
-            env={**os.environ, "CLAUDE_PROJECT_DIR": str(tmp_path)},
-            check=False,
+        patch = "*** Begin Patch\n" f"*** Update File: {path}\n" "*** End Patch\n"
+        _assert_denied(self._run_in(tmp_path, "apply_patch", {"command": patch}))
+        _assert_denied(self._run_in(tmp_path, "Write", {"file_path": path}))
+        # Ordinary names in the same directories stay allowed.
+        assert self._run_in(tmp_path, "Write", {"file_path": "src/config/settings.yaml"}) == {}
+
+    def test_strict_sensitive_names_ignores_explicit_prefixes(self, tmp_path):
+        """In strict mode an operator allowlist does not mask sensitive basenames."""
+        (tmp_path / ".map").mkdir()
+        (tmp_path / ".map" / "config.yaml").write_text(
+            "strict_sensitive_names: true\nsafe_path_prefixes:\n  - tests/fixtures/\n",
+            encoding="utf-8",
         )
-        _assert_denied(_parse_stdout(result.stdout))
+        _assert_denied(
+            self._run_in(tmp_path, "Read", {"file_path": "tests/fixtures/credentials.json"})
+        )
+        assert self._run_in(tmp_path, "Read", {"file_path": "tests/fixtures/example.json"}) == {}
 
 
 # =============================================================================

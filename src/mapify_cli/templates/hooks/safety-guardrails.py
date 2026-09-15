@@ -95,7 +95,7 @@ def extract_apply_patch_paths(payload: object) -> list[str]:
 
 # =============================================================================
 # Default constants (overridable via .map/config.yaml → dangerous_file_patterns,
-# dangerous_commands, safe_path_prefixes)
+# dangerous_commands, safe_path_prefixes, strict_sensitive_names)
 # =============================================================================
 
 # Dangerous file patterns (case-insensitive)
@@ -192,11 +192,11 @@ DANGEROUS_FILE_PATTERNS = _config.get(
 )
 DANGEROUS_COMMANDS = _config.get("dangerous_commands", _DEFAULT_DANGEROUS_COMMANDS)
 SAFE_PATH_PREFIXES = _config.get("safe_path_prefixes", _DEFAULT_SAFE_PATH_PREFIXES)
-# An operator who wrote safe_path_prefixes into .map/config.yaml supplied an
-# explicit allowlist; it wins over the sensitive-basename blocklist. The DEFAULT
-# prefixes do not: a nested credentials.json under tests/ stays denied unless
-# the project opts in.
-_SAFE_PATH_PREFIXES_EXPLICIT = "safe_path_prefixes" in _config
+# Opt-in hardening (.map/config.yaml -> strict_sensitive_names: true): check
+# the sensitive-basename blocklist BEFORE the safe directories, so a
+# credentials.json under tests/ or src/ is denied even though its directory is
+# allowlisted. Off by default: safe directories are trusted as-is.
+STRICT_SENSITIVE_NAMES = bool(_config.get("strict_sensitive_names", False))
 
 
 def is_safe_path(path: str) -> bool:
@@ -209,9 +209,9 @@ def check_file_safety(path: str) -> tuple[bool, str]:
     if not path:
         return True, ""
 
-    # Explicit operator allowlist (.map/config.yaml -> safe_path_prefixes)
-    # short-circuits the blocklist; the built-in default prefixes do not.
-    if _SAFE_PATH_PREFIXES_EXPLICIT and is_safe_path(path):
+    # Fast path: known safe directories (built-in or safe_path_prefixes) are
+    # trusted as-is unless strict_sensitive_names moves the blocklist first.
+    if not STRICT_SENSITIVE_NAMES and is_safe_path(path):
         return True, ""
 
     # Check dangerous patterns against the basename only, not the full path.
