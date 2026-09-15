@@ -57,11 +57,13 @@ def _copy_tree(
     *,
     fenced: bool = True,
     executable_suffixes: frozenset[str] = frozenset(),
+    skip_existing: bool = False,
 ) -> int:
     """Recursively install *src_dir* into *dst_dir* managed, skipping __pycache__.
 
     Codex skills/hooks are watched (``fenced=True``); MAP-owned trees pass
-    ``fenced=False``.  Returns the number of files installed.
+    ``fenced=False``. When ``skip_existing`` is true, existing destination
+    paths are preserved byte-for-byte. Returns the number of files installed.
     """
     count = 0
     dst_dir.mkdir(parents=True, exist_ok=True)
@@ -76,6 +78,8 @@ def _copy_tree(
             continue
         rel = src_file.relative_to(src_dir)
         target = dst_dir / rel
+        if skip_existing and (target.exists() or target.is_symlink()):
+            continue
         _install_managed_file(
             src_file,
             target,
@@ -250,9 +254,9 @@ def create_codex_files(project_path: Path) -> dict[str, int]:
     Watched files (skills, agents, config, AGENTS.md, hooks) are installed
     fence-aware so a re-install preserves any user content below the fence;
     hooks.json is merged without MAP metadata because Codex validates top-level
-    keys strictly; .map/scripts is MAP-owned (fenced=False, skip-if-exists).
+    keys strictly; .map/scripts is MAP-owned (fenced=False, preserving existing
+    files while adding any missing shipped scripts).
 
-    Skips .map/scripts/ if the directory already exists.
     Never creates or modifies any .claude/ path.
 
     Args:
@@ -264,6 +268,8 @@ def create_codex_files(project_path: Path) -> dict[str, int]:
     """
     templates_dir = get_templates_dir()
     codex_templates = templates_dir / "codex"
+    map_scripts_src = templates_dir / "map" / "scripts"
+    map_scripts_dst = project_path / ".map" / "scripts"
 
     empty_counts: dict[str, int] = {
         "skills": 0,
@@ -276,6 +282,12 @@ def create_codex_files(project_path: Path) -> dict[str, int]:
 
     if not codex_templates.exists():
         return empty_counts
+
+    if map_scripts_src.exists() and map_scripts_dst.is_symlink():
+        raise RuntimeError(
+            "unsafe Codex runtime destination at "
+            f"{map_scripts_dst}: symbolic links are not allowed"
+        )
 
     counts: dict[str, int] = dict(empty_counts)
     codex_dir = project_path / ".codex"
@@ -391,19 +403,17 @@ def create_codex_files(project_path: Path) -> dict[str, int]:
             counts["docs"] += 1
 
     # ------------------------------------------------------------------
-    # 6. .map/scripts/ — skip-if-exists (do not overwrite user scripts)
-    #    MAP-owned: install fenced=False (no fence) when absent.
+    # 6. .map/scripts/ — add missing shipped scripts without overwriting files
+    #    MAP-owned: install fenced=False (no fence).
     # ------------------------------------------------------------------
-    map_scripts_dst = project_path / ".map" / "scripts"
-    if not map_scripts_dst.exists():
-        map_scripts_src = templates_dir / "map" / "scripts"
-        if map_scripts_src.exists():
-            counts["scripts"] = _copy_tree(
-                map_scripts_src,
-                map_scripts_dst,
-                version,
-                fenced=False,
-                executable_suffixes=_EXEC_SUFFIXES,
-            )
+    if map_scripts_src.exists():
+        counts["scripts"] = _copy_tree(
+            map_scripts_src,
+            map_scripts_dst,
+            version,
+            fenced=False,
+            executable_suffixes=_EXEC_SUFFIXES,
+            skip_existing=True,
+        )
 
     return counts

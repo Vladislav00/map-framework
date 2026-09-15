@@ -4982,6 +4982,19 @@ class TestCodexProvider:
         )
         return tmp_path
 
+    @staticmethod
+    def _delivered_tree_inventory(root: Path) -> set[Path]:
+        """Return files copied by the Codex tree copier's standard filters."""
+        ignored_names = {"__pycache__", ".DS_Store"}
+        ignored_suffixes = {".pyc", ".pyo"}
+        return {
+            path.relative_to(root)
+            for path in root.rglob("*")
+            if path.is_file()
+            and not any(part in ignored_names for part in path.parts)
+            and path.suffix not in ignored_suffixes
+        }
+
     # ------------------------------------------------------------------ #
     # AC-1: .agents/skills/map-plan/SKILL.md created                      #
     # ------------------------------------------------------------------ #
@@ -5080,36 +5093,113 @@ class TestCodexProvider:
         )
 
     # ------------------------------------------------------------------ #
-    # AC-6: .map/scripts/ installed (or skipped if already present)       #
+    # AC-6: complete provider inventory and non-destructive script repair #
     # ------------------------------------------------------------------ #
 
-    def test_ac06_map_scripts_installed_or_skipped(self, codex_project, tmp_path):
-        """AC-6: .map/scripts/ installed when absent, pre-existing files preserved."""
+    def test_ac06_clean_install_has_complete_provider_inventory(self, codex_project):
+        """AC-6: a clean Codex install contains every shipped provider file."""
+        templates = get_templates_dir()
         map_scripts = codex_project / ".map" / "scripts"
-        templates_scripts = get_templates_dir() / "map" / "scripts"
-        if templates_scripts.exists() and any(templates_scripts.iterdir()):
-            assert map_scripts.exists(), (
-                ".map/scripts/ must exist when template provides scripts"
-            )
+        agents_skills = codex_project / ".agents" / "skills"
+        codex_dir = codex_project / ".codex"
 
-        # Verify skip-if-exists: pre-existing custom scripts survive codex init
-        project2 = tmp_path / "skip_test"
-        project2.mkdir()
-        scripts_dir = project2 / ".map" / "scripts"
+        expected_scripts = self._delivered_tree_inventory(templates / "map" / "scripts")
+        expected_skills = self._delivered_tree_inventory(templates / "codex" / "skills")
+        expected_codex = self._delivered_tree_inventory(templates / "codex")
+        expected_codex = {
+            path
+            for path in expected_codex
+            if path.parts[0] not in {"skills", "references"}
+            and path != Path("AGENTS.md")
+        }
+
+        assert Path("map_step_runner.py") in expected_scripts
+        assert self._delivered_tree_inventory(map_scripts) == expected_scripts
+        assert self._delivered_tree_inventory(agents_skills) == expected_skills
+        assert self._delivered_tree_inventory(codex_dir) == expected_codex
+
+    def test_ac06_partial_map_scripts_are_repaired_without_overwrite(self, tmp_path):
+        """AC-6: missing shipped scripts are added and existing files preserved."""
+        templates_scripts = get_templates_dir() / "map" / "scripts"
+        expected_scripts = self._delivered_tree_inventory(templates_scripts)
+
+        project = tmp_path / "partial_install"
+        project.mkdir()
+        scripts_dir = project / ".map" / "scripts"
         scripts_dir.mkdir(parents=True)
+        existing_script = scripts_dir / "map_step_runner.py"
+        existing_bytes = b"#!/usr/bin/env python3\n# user-preserved bytes\n"
+        existing_script.write_bytes(existing_bytes)
         custom_script = scripts_dir / "custom.py"
-        custom_script.write_text("# user custom script\n")
+        custom_bytes = b"# user custom script\n"
+        custom_script.write_bytes(custom_bytes)
 
         runner2 = CliRunner()
-        os.chdir(project2)
+        os.chdir(project)
         result = runner2.invoke(
             app, ["init", ".", "--provider", "codex", "--no-git", "--force"]
         )
         assert result.exit_code == 0, f"init failed: {result.output}"
-        assert custom_script.exists(), (
-            ".map/scripts/custom.py must survive codex init (skip-if-exists)"
+        assert existing_script.read_bytes() == existing_bytes
+        assert custom_script.read_bytes() == custom_bytes
+        assert self._delivered_tree_inventory(scripts_dir) == expected_scripts | {
+            Path("custom.py")
+        }
+        assert all((scripts_dir / path).exists() for path in expected_scripts), (
+            "Every missing shipped .map/scripts file must be installed"
         )
-        assert custom_script.read_text() == "# user custom script\n"
+
+    def test_ac06_symlinked_map_scripts_is_rejected_without_external_writes(
+        self, tmp_path
+    ):
+        """AC-6: runtime repair must never follow a project scripts symlink."""
+        project = tmp_path / "symlinked_scripts"
+        project.mkdir()
+        external_scripts = tmp_path / "external_scripts"
+        external_scripts.mkdir()
+        sentinel = external_scripts / "sentinel.bin"
+        sentinel.write_bytes(b"external-runtime-sentinel\x00\xff")
+        before = {
+            path.relative_to(external_scripts): path.read_bytes()
+            for path in external_scripts.rglob("*")
+            if path.is_file()
+        }
+
+        scripts_dir = project / ".map" / "scripts"
+        scripts_dir.parent.mkdir()
+        try:
+            scripts_dir.symlink_to(external_scripts, target_is_directory=True)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"directory symlinks unavailable: {exc}")
+
+        runner2 = CliRunner()
+        os.chdir(project)
+        result = runner2.invoke(
+            app,
+            [
+                "init",
+                ".",
+                "--provider",
+                "codex",
+                "--no-git",
+                "--mcp",
+                "none",
+                "--force",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert isinstance(result.exception, RuntimeError)
+        assert "unsafe Codex runtime destination" in str(result.exception)
+        assert "symbolic links are not allowed" in str(result.exception)
+        assert scripts_dir.is_symlink()
+        after = {
+            path.relative_to(external_scripts): path.read_bytes()
+            for path in external_scripts.rglob("*")
+            if path.is_file()
+        }
+        assert after == before
+        assert set(after) == {Path("sentinel.bin")}
 
     # ------------------------------------------------------------------ #
     # AC-7: Default init (no --provider) creates .claude/, not .codex/    #
@@ -5119,9 +5209,10 @@ class TestCodexProvider:
         """AC-7: 'init .' without --provider must create .claude/ and not .codex/."""
         local_runner = CliRunner()
         os.chdir(tmp_path)
-        result = local_runner.invoke(
-            app, ["init", ".", "--no-git", "--mcp", "none", "--force"]
-        )
+        with mock.patch("mapify_cli.configure_global_permissions"):
+            result = local_runner.invoke(
+                app, ["init", ".", "--no-git", "--mcp", "none", "--force"]
+            )
         assert result.exit_code == 0, f"Default init failed:\n{result.output}"
         assert (tmp_path / ".claude").exists(), (
             ".claude/ must exist for default provider"
@@ -5477,7 +5568,9 @@ class TestCodexProvider:
         matchers = [entry.get("matcher") for entry in pre_tool_use]
         assert "Bash|apply_patch" in matchers
         combined = next(
-            entry for entry in pre_tool_use if entry.get("matcher") == "Bash|apply_patch"
+            entry
+            for entry in pre_tool_use
+            if entry.get("matcher") == "Bash|apply_patch"
         )
         commands = [hook["command"] for hook in combined["hooks"]]
         assert any("workflow-gate.py" in command for command in commands)
@@ -5579,10 +5672,13 @@ class TestCodexProvider:
             for hook in entry.get("hooks", [])
             if isinstance(hook, dict)
         ]
-        assert sum(
-            ".codex/hooks/workflow-gate.py" in command
-            for command in all_pre_commands
-        ) == 1
+        assert (
+            sum(
+                ".codex/hooks/workflow-gate.py" in command
+                for command in all_pre_commands
+            )
+            == 1
+        )
         assert any(
             entry.get("matcher") == "Read"
             and entry["hooks"][0]["command"] == "echo read"
@@ -5704,9 +5800,7 @@ class TestCodexProvider:
         )
         assert hook_output.get("hookEventName") == "PreToolUse"
 
-    def test_ac20b_codex_safety_hook_blocks_apply_patch_secret(
-        self, codex_project
-    ):
+    def test_ac20b_codex_safety_hook_blocks_apply_patch_secret(self, codex_project):
         """Codex apply_patch paths pass through the shared sensitive-file gate."""
         safety_script = codex_project / ".codex" / "hooks" / "safety-guardrails.py"
         payload = json.dumps(
@@ -5714,9 +5808,7 @@ class TestCodexProvider:
                 "hook_event_name": "PreToolUse",
                 "tool_name": "apply_patch",
                 "tool_input": {
-                    "command": "*** Begin Patch\n"
-                    "*** Update File: .env\n"
-                    "*** End Patch\n"
+                    "command": "*** Begin Patch\n*** Update File: .env\n*** End Patch\n"
                 },
             }
         )
@@ -5735,9 +5827,7 @@ class TestCodexProvider:
         assert output["hookEventName"] == "PreToolUse"
         assert output["permissionDecision"] == "deny"
 
-    def test_ac20c_codex_compaction_context_uses_session_start(
-        self, codex_project
-    ):
+    def test_ac20c_codex_compaction_context_uses_session_start(self, codex_project):
         """Post-compaction context uses SessionStart's supported context channel."""
         branch_dir = codex_project / ".map" / "default"
         branch_dir.mkdir(parents=True, exist_ok=True)
@@ -5756,9 +5846,7 @@ class TestCodexProvider:
 
         proc = subprocess.run(
             [sys.executable, str(hook)],
-            input=json.dumps(
-                {"hook_event_name": "SessionStart", "source": "compact"}
-            ),
+            input=json.dumps({"hook_event_name": "SessionStart", "source": "compact"}),
             capture_output=True,
             text=True,
             cwd=codex_project,
@@ -5776,7 +5864,9 @@ class TestCodexProvider:
     ):
         """SessionStart and Stop memory work without importing from the project."""
         hooks_dir = codex_project / ".codex" / "hooks"
-        mapify_executable = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "mapify"
+        mapify_executable = (
+            Path(__file__).resolve().parents[1] / ".venv" / "bin" / "mapify"
+        )
         assert mapify_executable.is_file()
         env = os.environ.copy()
         env.pop("PYTHONPATH", None)
@@ -5844,13 +5934,11 @@ class TestCodexProvider:
             check=False,
         )
         assert session.returncode == 0, session.stderr
-        context = json.loads(session.stdout)["hookSpecificOutput"][
-            "additionalContext"
-        ]
+        context = json.loads(session.stdout)["hookSpecificOutput"]["additionalContext"]
         assert "isolated runtime recall marker" in context
-        assert "from mapify_cli" not in (
-            hooks_dir / "map-memory-session.py"
-        ).read_text(encoding="utf-8")
+        assert "from mapify_cli" not in (hooks_dir / "map-memory-session.py").read_text(
+            encoding="utf-8"
+        )
 
     def test_ac20d_codex_bash_write_is_phase_gated(self, codex_project):
         """A shell redirection cannot bypass the RESEARCH mutation gate."""
@@ -5930,9 +6018,7 @@ class TestCodexProvider:
             "true\nprintf x >> src.py",
         ],
     )
-    def test_ac20d2_explicit_bash_targets_are_phase_gated(
-        self, codex_project, command
-    ):
+    def test_ac20d2_explicit_bash_targets_are_phase_gated(self, codex_project, command):
         """Every explicit write target, on any line, goes through the phase gate."""
         assert self._run_codex_gate(codex_project, command) == "deny"
 
@@ -5942,13 +6028,13 @@ class TestCodexProvider:
             # The orchestrator's own commands, verbatim from the shipped skills.
             "SUBTASK_ID=$(jq -r '.current_subtask_id' \".map/default/step_state.json\")",
             "NEXT_STEP=$(python3 .map/scripts/map_orchestrator.py get_next_step)",
-            "MAP_CONTEXT=$(python3 .map/scripts/map_step_runner.py build_context_block \"$BRANCH\" \"$SUBTASK_ID\")",
+            'MAP_CONTEXT=$(python3 .map/scripts/map_step_runner.py build_context_block "$BRANCH" "$SUBTASK_ID")',
             "TEST_OUTPUT=$(pytest --tb=short 2>&1) || true",
             "TEST_OUTPUT=$(go test ./... 2>&1) || true",
             "pytest -q",
             "make test 2>/dev/null",
             "date -u +%Y-%m-%dT%H:%M:%SZ",
-            "printf '%s' \"$RESEARCH_FINDINGS\" | python3 .map/scripts/map_step_runner.py save_research \"$BRANCH\" \"$SUBTASK_ID\"",
+            'printf \'%s\' "$RESEARCH_FINDINGS" | python3 .map/scripts/map_step_runner.py save_research "$BRANCH" "$SUBTASK_ID"',
             # Writes into .map/ (exempt) and outside the repo (orthogonal).
             "printf x > .map/default/notes.md",
             "printf x > /tmp/map-safe.txt",
@@ -5965,8 +6051,8 @@ class TestCodexProvider:
     @pytest.mark.parametrize(
         "command",
         [
-            'python3 -c "open(\'src.py\', \'w\').write(\'x\')"',
-            'ruby -e "File.write(\'src.py\', \'x\')"',
+            "python3 -c \"open('src.py', 'w').write('x')\"",
+            "ruby -e \"File.write('src.py', 'x')\"",
             'echo "$(touch src.py)"',
             "cat <(touch src.py)",
         ],
@@ -5991,9 +6077,7 @@ class TestCodexProvider:
 
         proc = subprocess.run(
             ["bash", "-lc", command],
-            input=json.dumps(
-                {"tool_name": "Bash", "tool_input": {"command": "pwd"}}
-            ),
+            input=json.dumps({"tool_name": "Bash", "tool_input": {"command": "pwd"}}),
             capture_output=True,
             text=True,
             cwd=codex_project,
@@ -6011,9 +6095,7 @@ class TestCodexProvider:
             'echo unsafe > "src".py',
         ],
     )
-    def test_ac20e2_expanded_bash_targets_fail_closed(
-        self, codex_project, command
-    ):
+    def test_ac20e2_expanded_bash_targets_fail_closed(self, codex_project, command):
         """Variable/glob targets cannot be misclassified as orthogonal."""
         branch_dir = codex_project / ".map" / "default"
         branch_dir.mkdir(parents=True, exist_ok=True)
@@ -6027,13 +6109,7 @@ class TestCodexProvider:
             encoding="utf-8",
         )
         (branch_dir / "blueprint.json").write_text(
-            json.dumps(
-                {
-                    "subtasks": [
-                        {"id": "ST-1", "affected_files": ["src.py"]}
-                    ]
-                }
-            ),
+            json.dumps({"subtasks": [{"id": "ST-1", "affected_files": ["src.py"]}]}),
             encoding="utf-8",
         )
         hook = codex_project / ".codex" / "hooks" / "workflow-gate.py"
@@ -6055,9 +6131,10 @@ class TestCodexProvider:
         )
 
         assert proc.returncode == 0
-        assert json.loads(proc.stdout)["hookSpecificOutput"][
-            "permissionDecision"
-        ] == "deny"
+        assert (
+            json.loads(proc.stdout)["hookSpecificOutput"]["permissionDecision"]
+            == "deny"
+        )
 
     def test_ac20f_stop_dispatcher_runs_handlers_in_order(self, codex_project):
         """Codex Stop serializes scrub, validation, tokens, then memory."""
