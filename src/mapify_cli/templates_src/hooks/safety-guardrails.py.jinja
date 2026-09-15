@@ -18,10 +18,14 @@ Exit codes:
 [% set guard_mode = "deny" %][% include "_partials/python-version-guard.py.jinja" %]
 import json
 import os
+import re
 import sys
 
+[% include "_partials/apply-patch-paths.py.jinja" %]
+
 # =============================================================================
-# Default constants (overridable via .map/config.yaml → safe_path_prefixes)
+# Default constants (overridable via .map/config.yaml → dangerous_file_patterns,
+# dangerous_commands, safe_path_prefixes, strict_sensitive_names)
 # =============================================================================
 
 # Dangerous file patterns (case-insensitive)
@@ -118,6 +122,11 @@ DANGEROUS_FILE_PATTERNS = _config.get(
 )
 DANGEROUS_COMMANDS = _config.get("dangerous_commands", _DEFAULT_DANGEROUS_COMMANDS)
 SAFE_PATH_PREFIXES = _config.get("safe_path_prefixes", _DEFAULT_SAFE_PATH_PREFIXES)
+# Opt-in hardening (.map/config.yaml -> strict_sensitive_names: true): check
+# the sensitive-basename blocklist BEFORE the safe directories, so a
+# credentials.json under tests/ or src/ is denied even though its directory is
+# allowlisted. Off by default: safe directories are trusted as-is.
+STRICT_SENSITIVE_NAMES = bool(_config.get("strict_sensitive_names", False))
 
 
 def is_safe_path(path: str) -> bool:
@@ -130,8 +139,9 @@ def check_file_safety(path: str) -> tuple[bool, str]:
     if not path:
         return True, ""
 
-    # Fast path: known safe directories
-    if is_safe_path(path):
+    # Fast path: known safe directories (built-in or safe_path_prefixes) are
+    # trusted as-is unless strict_sensitive_names moves the blocklist first.
+    if not STRICT_SENSITIVE_NAMES and is_safe_path(path):
         return True, ""
 
     # Check dangerous patterns against the basename only, not the full path.
@@ -410,6 +420,16 @@ def main() -> None:
             is_safe, reason = check_verifier_path(file_path)
             if not is_safe:
                 deny(f"{reason} (tool={tool_name})")
+
+    elif tool_name == "apply_patch":
+        for file_path in extract_apply_patch_paths(tool_input):
+            is_safe, reason = check_file_safety(file_path)
+            if not is_safe:
+                deny(f"{reason} (tool={tool_name})")
+            if verifier:
+                is_safe, reason = check_verifier_path(file_path)
+                if not is_safe:
+                    deny(f"{reason} (tool={tool_name})")
 
     # Check bash commands
     elif tool_name == "Bash":

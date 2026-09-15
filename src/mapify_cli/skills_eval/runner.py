@@ -151,15 +151,25 @@ def load_eval_set(path: Path) -> list[EvalSetEntry]:
 # ---------------------------------------------------------------------------
 
 
-def _read_present_cell_ids(out_path: Path) -> set[str]:
-    """Return the set of ``cell_id`` values already in *out_path*.
+def _record_matches_provider(row: dict[str, Any], provider: str | None) -> bool:
+    """Return whether a persisted row belongs to the requested provider.
 
-    Skips blank lines and JSON-malformed lines defensively so a partial last
-    line (write interrupted mid-flush) does not crash resume.
+    Providerless rows predate Codex skill eval support and are therefore
+    treated as Claude rows for backward-compatible resume behavior.
     """
-    present: set[str] = set()
+    if provider is None:
+        return True
+    row_provider = row.get("provider")
+    if row_provider is None:
+        return provider == "claude"
+    return row_provider == provider
+
+
+def _read_valid_jsonl_rows(path: Path) -> list[dict[str, Any]]:
+    """Read valid object rows while tolerating interrupted JSONL fragments."""
+    rows: list[dict[str, Any]] = []
     try:
-        with open(out_path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             for raw_line in fh:
                 raw_line = raw_line.strip()
                 if not raw_line:
@@ -168,20 +178,35 @@ def _read_present_cell_ids(out_path: Path) -> set[str]:
                     row: Any = json.loads(raw_line)
                 except json.JSONDecodeError:
                     logger.debug(
-                        "_read_present_cell_ids: skipping malformed line in %s", out_path
+                        "_read_valid_jsonl_rows: skipping malformed line in %s", path
                     )
                     continue
-                if not isinstance(row, dict):
-                    continue
-                cell_id_val = row.get("cell_id")
-                if isinstance(cell_id_val, str) and cell_id_val:
-                    present.add(cell_id_val)
+                if isinstance(row, dict):
+                    rows.append(row)
     except OSError as exc:
         logger.warning(
-            "_read_present_cell_ids: could not read %s: %s -- treating as empty",
-            out_path,
+            "_read_valid_jsonl_rows: could not read %s: %s -- treating as empty",
+            path,
             exc,
         )
+    return rows
+
+
+def _read_present_cell_ids(
+    out_path: Path, provider: str | None = None
+) -> set[str]:
+    """Return the set of ``cell_id`` values already in *out_path*.
+
+    Skips blank lines and JSON-malformed lines defensively so a partial last
+    line (write interrupted mid-flush) does not crash resume.
+    """
+    present: set[str] = set()
+    for row in _read_valid_jsonl_rows(out_path):
+        if not _record_matches_provider(row, provider):
+            continue
+        cell_id_val = row.get("cell_id")
+        if isinstance(cell_id_val, str) and cell_id_val:
+            present.add(cell_id_val)
     return present
 
 
@@ -215,6 +240,7 @@ def evaluate_cell(
     prompt_index: int,
     run_number: int,
     dispatcher: VariantDispatcher,
+    provider: str | None = None,
 ) -> EvalResultRecord:
     """Dispatch one (entry, prompt_index, run_number) cell and return the record.
 
@@ -258,6 +284,7 @@ def evaluate_cell(
         triggered_skill=dispatch_result.triggered_skill,
         token_usage=dispatch_result.token_usage,
         duration_s=dispatch_result.duration_s,
+        provider=provider,
         assertions_passed=passed_list,
         assertions_failed=failed_list,
         raw_output=dispatch_result.raw_output,
@@ -272,6 +299,7 @@ def run_eval(
     runs: int,
     out_path: Path,
     resume: bool = False,
+    provider: str | None = None,
 ) -> list[EvalResultRecord]:
     """Execute the prompts x runs evaluation matrix and write results to *out_path*.
 
@@ -312,7 +340,7 @@ def run_eval(
     # Resolve set of already-written cells for resume mode.
     present_cell_ids: set[str] = set()
     if resume and out_path.exists():
-        present_cell_ids = _read_present_cell_ids(out_path)
+        present_cell_ids = _read_present_cell_ids(out_path, provider)
         logger.info(
             "run_eval: resume mode -- %d cells already present in %s",
             len(present_cell_ids),
@@ -343,6 +371,7 @@ def run_eval(
                 prompt_index=prompt_index,
                 run_number=run_number,
                 dispatcher=dispatcher,
+                provider=provider,
             )
 
             # INV-4: durable per-cell append-and-flush before advancing.
@@ -376,8 +405,15 @@ def _append_record(out_path: Path, record: EvalResultRecord) -> None:
     the matrix on every cell -- the OS buffer flush is sufficient for the
     sequential use-case.
     """
-    line = json.dumps(record.to_dict()) + "\n"
-    with open(out_path, "a", encoding="utf-8") as fh:
+    line = (json.dumps(record.to_dict()) + "\n").encode("utf-8")
+    with open(out_path, "ab+") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        if size:
+            fh.seek(-1, 2)
+            if fh.read(1) != b"\n":
+                fh.seek(0, 2)
+                fh.write(b"\n")
         fh.write(line)
         fh.flush()
 
@@ -387,7 +423,9 @@ def _append_record(out_path: Path, record: EvalResultRecord) -> None:
 # ---------------------------------------------------------------------------
 
 
-def default_run_path(root: Path, skill: str, timestamp: str) -> Path:
+def default_run_path(
+    root: Path, skill: str, timestamp: str, provider: str | None = None
+) -> Path:
     """Return the canonical .jsonl path for a new eval run.
 
     Parameters
@@ -406,10 +444,15 @@ def default_run_path(root: Path, skill: str, timestamp: str) -> Path:
     Path
         ``<root>/.map/eval-runs/<skill>/<timestamp>.jsonl``
     """
-    return root / ".map" / "eval-runs" / skill / f"{timestamp}.jsonl"
+    run_dir = root / ".map" / "eval-runs" / skill
+    if provider is not None:
+        run_dir /= provider
+    return run_dir / f"{timestamp}.jsonl"
 
 
-def latest_run_path(root: Path, skill: str) -> Path | None:
+def latest_run_path(
+    root: Path, skill: str, provider: str | None = None
+) -> Path | None:
     """Return the most-recent ``.jsonl`` path for *skill*, or ``None``.
 
     Scans ``<root>/.map/eval-runs/<skill>/`` for ``*.jsonl`` files and returns
@@ -417,9 +460,24 @@ def latest_run_path(root: Path, skill: str) -> Path | None:
     Returns ``None`` if the directory does not exist or is empty.
     """
     run_dir = root / ".map" / "eval-runs" / skill
-    if not run_dir.is_dir():
-        return None
-    candidates = sorted(run_dir.glob("*.jsonl"))
-    if not candidates:
-        return None
-    return candidates[-1]
+    if provider is None:
+        candidates = sorted(run_dir.glob("*.jsonl")) if run_dir.is_dir() else []
+        return candidates[-1] if candidates else None
+
+    provider_dir = run_dir / provider
+    candidates = (
+        sorted(provider_dir.glob("*.jsonl")) if provider_dir.is_dir() else []
+    )
+    if candidates:
+        return candidates[-1]
+
+    # Legacy artifacts lived directly under the skill directory. Only Claude
+    # may claim providerless rows; explicitly tagged rows remain provider-safe.
+    legacy_candidates = sorted(run_dir.glob("*.jsonl")) if run_dir.is_dir() else []
+    for candidate in reversed(legacy_candidates):
+        valid_rows = _read_valid_jsonl_rows(candidate)
+        if valid_rows and all(
+            _record_matches_provider(row, provider) for row in valid_rows
+        ):
+            return candidate
+    return None

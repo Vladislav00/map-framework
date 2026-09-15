@@ -1,16 +1,35 @@
+[#- One launcher string for every MAP hook: the repo root is resolved at run
+    time so the registration survives a clone move, and CLAUDE_PROJECT_DIR is
+    the env contract every hook script reads. -#]
+[%- set root = "$(git rev-parse --show-toplevel 2>/dev/null || pwd)" -%]
+[%- macro hook(script, timeout, status=None, ctx_limit=None, env="") -%]
+{"type": "command", "command": "CLAUDE_PROJECT_DIR=\"<% root %>\" <% env %>python3 \"<% root %>/.codex/hooks/<% script %>\"", "timeout": <% timeout %>[% if status %], "statusMessage": "<% status %>"[% endif %][% if ctx_limit %], "additionalContextLimit": <% ctx_limit %>[% endif %]}
+[%- endmacro -%]
 {
   "hooks": {
+    "SessionStart": [
+      {"hooks": [<% hook("map-memory-session.py", 60, "Loading MAP memory", 5000, env="MAP_PROVIDER=codex ") %>]},
+      {"matcher": "compact", "hooks": [<% hook("post-compact-context.py", 5, ctx_limit=5000) %>]}
+    ],
+    "SessionEnd": [{"hooks": [<% hook("map-memory-endmark.py", 3) %>]}],
     "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$(git rev-parse --show-toplevel)/.codex/hooks/workflow-gate.py\"",
-            "timeout": 600
-          }
-        ]
-      }
-    ]
+      {"matcher": "Bash|apply_patch", "hooks": [
+        <% hook("safety-guardrails.py", 5, "Checking MAP safety policy") %>,
+        <% hook("workflow-context-injector.py", 3, ctx_limit=5000) %>,
+        <% hook("workflow-gate.py", 5, "Checking MAP workflow phase") %>
+      ]}
+    ],
+    "PostToolUse": [{"matcher": "Bash|apply_patch", "hooks": [<% hook("ralph-iteration-logger.py", 5) %>]}],
+    "PreCompact": [{"matcher": "manual|auto", "hooks": [
+      <% hook("ralph-context-pruner.py", 10) %>,
+      <% hook("pre-compact-save-transcript.py", 30) %>
+    ]}],
+    "SubagentStop": [{"hooks": [<% hook("map-token-meter.py", 5) %>]}],
+    "Stop": [{"hooks": [<% hook("map-stop.py", 165, "Running MAP end-of-turn checks") %>]}],
+    "UserPromptSubmit": [{"hooks": [
+      <% hook("detect-clarification-triggers.py", 3, ctx_limit=5000) %>,
+      <% hook("context-meter.py", 5, ctx_limit=5000) %>,
+      <% hook("map-memory-recall.py", 10, ctx_limit=5000) %>
+    ]}]
   }
 }

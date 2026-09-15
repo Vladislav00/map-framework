@@ -357,7 +357,8 @@ def _build_codex_resolver(
     """
     codex_templates_root = templates_root / "codex"
     codex_dev_root = repo_root / ".codex"
-    agents_skills_root = repo_root / ".agents" / "skills"
+    agents_root = repo_root / ".agents"
+    agents_skills_root = agents_root / "skills"
 
     def resolver(rel_path: Path) -> list[Path]:
         rel_str = rel_path.as_posix()  # use forward slashes for matching
@@ -368,6 +369,11 @@ def _build_codex_resolver(
             # Intent: codex skills live in .agents/skills/, not .codex/skills/
             dev_rel = Path(rel_str[len("skills/") :])
             return [shipped, agents_skills_root / dev_rel]
+
+        # Shared references linked from .agents/skills/<name>/SKILL.md live
+        # beside the Codex skill root, so ../../references/... resolves.
+        if rel_str.startswith("references/"):
+            return [shipped, agents_root / rel_path]
 
         # --- All other codex paths: shipped codex/ tree + .codex/ dev tree ---
         return [shipped, codex_dev_root / rel_path]
@@ -609,7 +615,7 @@ def render_repo_trees(
         provider_templates_src = templates_src_root / "codex"
     else:
         raise ValueError(
-            f"Unknown provider {provider!r}. " "Expected 'claude' or 'codex'."
+            f"Unknown provider {provider!r}. Expected 'claude' or 'codex'."
         )
 
     return render_tree(
@@ -635,6 +641,7 @@ _GATE_TREE_RELPATHS: tuple[str, ...] = (
     ".claude",
     ".codex",
     ".agents/skills",
+    ".agents/references",
 )
 
 

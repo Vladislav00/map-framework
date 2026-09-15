@@ -10,7 +10,7 @@ MAP is a Python 3.11+ CLI (`mapify`) plus provider-specific prompt/skill scaffol
 
 The 3.11 floor applies to **two independent interpreters**, and they are usually not the same one. The CLI runs under whatever installed it (`uvx`/`uv tool`/`pip`), constrained by `requires-python` and re-checked at import by `mapify_cli/_python_guard.py`. The installed runtime surfaces — every hook in `.claude/hooks/` and `.codex/hooks/`, every runner in `.map/scripts/` — are executables with a `#!/usr/bin/env python3` shebang, so they run under PATH's `python3` in the user's shell (on stock macOS: 3.9). `mapify_cli/python_runtime.py` resolves that second interpreter the way a shebang does, skipping its own virtualenv/`uvx` `bin` because that environment is gone by the time Claude Code launches a hook; `mapify init` refuses to install onto a too-old one (`--skip-python-check`, or `MAPIFY_SKIP_PYTHON_CHECK=1` for non-interactive installs, overrides it; `--refresh-existing` warns instead of blocking), and `mapify check`/`doctor` report it. Each shipped executable carries the matching version guard rendered from `templates_src/_partials/python-version-guard.py.jinja`, so an old interpreter reports the version instead of an `ImportError` on `datetime.UTC`. The guard has two modes, selected per file by the including template: context and observability hooks **fail open** (stderr + exit 1, a non-blocking hook error), while the blocking PreToolUse gates — `safety-guardrails.py` and both `workflow-gate.py` copies, rendered with `guard_mode = "deny"` — **fail closed**, emitting the structured `permissionDecision: deny` response so a gate that cannot run never degrades into silent "allow".
 
-The current package is `mapify-cli` `3.22.0`. It ships a Typer CLI, provider delivery helpers, shared workflow-state and verification utilities, bundled Claude/Codex templates, hook scripts, cross-session memory helpers, skill-evaluation utilities, install manifest/lock auditing, durable approval holds, clean end-of-flow teardown, and tests that validate template contracts, artifact schemas, prompt tone, provider surfaces, workflow gates, memory hooks, skill-eval behavior, token-budget behavior, governance-deny fixtures, and install integrity.
+The current package is `mapify-cli` `3.29.1`. It ships a Typer CLI, provider delivery helpers, shared workflow-state and verification utilities, bundled Claude/Codex templates, hook scripts, cross-session memory helpers, skill-evaluation utilities, install manifest/lock auditing, durable approval holds, clean end-of-flow teardown, and tests that validate template contracts, artifact schemas, prompt tone, provider surfaces, workflow gates, memory hooks, skill-eval behavior, token-budget behavior, governance-deny fixtures, and install integrity.
 
 The remainder of this file contains the deeper implementation dive (workflow-specific agent sequences, artifact specs, MCP integration, template maintenance, and context engineering).
 
@@ -25,7 +25,7 @@ The remainder of this file contains the deeper implementation dive (workflow-spe
 - Host-path and cross-process safety primitives, including canonical `MAP_*`/`~/.map/` reference docs and `flock_with_state` lock sidecars for serialized host-level workflows
 - Plan/spec citation validation that requires existing `file:line` evidence before decomposition proceeds
 - Per-subtask token accounting: the `map-token-meter` hook (SubagentStop/Stop) attributes transcript `usage` to the active subtask/phase/agent in `.map/<branch>/token_log.jsonl`, rolled up (with cost, cache-hit ratio, and advisory research ROI) into `token_accounting.json`; logic is self-contained in `.map/scripts/map_step_runner.py` so it runs without the `mapify_cli` package present
-- Internal-ID scrub: at run completion the `scrub-internal-ids.py` Stop hook removes MAP-internal workflow IDs (`ST-`/`AC-`/`VC-`/`INV-`/`HC-`) that leaked into run-changed code **comments** and `vc<n>` test names (strings, docstrings, and data files are left intact and only reported, to avoid corrupting legitimate values) and commits the cleanup; the deterministic engine in `.map/scripts/scrub_internal_ids.py` is hard-scoped to the run's git diff and runs once per completed run (Claude provider only — Codex has no `Stop` event)
+- Internal-ID scrub: at run completion the `scrub-internal-ids.py` Stop hook removes MAP-internal workflow IDs (`ST-`/`AC-`/`VC-`/`INV-`/`HC-`) that leaked into run-changed code **comments** and `vc<n>` test names (strings, docstrings, and data files are left intact and only reported, to avoid corrupting legitimate values) and commits the cleanup; the deterministic engine in `.map/scripts/scrub_internal_ids.py` is hard-scoped to the run's git diff and runs once per completed run for both providers
 - Durable approval holds for human-gated risky workflow actions, including redacted branch-scoped JSON and Markdown artifacts plus explicit resume-blocking state
 - End-of-flow completion and teardown: sequential runs atomically mark `WORKFLOW_COMPLETE`, completed branches can be archived, and branch reuse auto-archives prior completed state before the next workflow starts
 - Skill/template audit surfaces such as `SkillIR`, prompt-tone checks, mutation-boundary checks, and dependency/task validation helpers
@@ -68,7 +68,7 @@ The remainder of this file contains the deeper implementation dive (workflow-spe
 - `src/mapify_cli/`: CLI implementation and workflow helpers (token budgeting, dependency graph, verification recording, workflow finalization, provider delivery)
 - `src/mapify_cli/delivery/`: Provider abstraction plus Claude/Codex scaffolding generators and managed file copier logic
 - `src/mapify_cli/memory/`: cross-session scratch capture, digest schema, finalize, and recall helpers used by generated hooks and `/map-memory-now`
-- `src/mapify_cli/skills_eval/`: skill trigger eval runner, assertions, aggregation, Claude dispatcher, description optimizer, patcher, proposer, schema, and HTML viewer
+- `src/mapify_cli/skills_eval/`: skill trigger eval runner, assertions, aggregation, Claude/Codex dispatchers, description optimizer, patcher, proposer, schema, and HTML viewer
 - `src/mapify_cli/update_versions.py`: strict stable-version parsing, non-yanked PyPI target selection, and bounded official GitHub release highlights
 - `src/mapify_cli/update_state.py`: atomic project-local update state, rolling 24-hour due checks, updater/installer/provider lock ordering, and direct-child refresh leases
 - `src/mapify_cli/update_install.py`: install-kind classification, isolated child-owned package installation, installed-provider detection, and fresh-process provider refresh
@@ -85,7 +85,7 @@ The remainder of this file contains the deeper implementation dive (workflow-spe
 - `.agents/skills/`: Codex repository skills generated by `mapify init . --provider codex`
 - `.codex/`: Codex CLI config, hooks, and TOML agents generated by `mapify init . --provider codex`
 - `.map/<branch>/`: Branch-scoped run artifacts (plans/contracts, check outputs, review notes, learning handoffs, session-memory digests)
-- `.map/eval-runs/<skill>/`: durable skill-evaluation run logs and optimization JSON/HTML reports
+- `.map/eval-runs/<skill>/<provider>/`: durable provider-scoped skill-evaluation run logs; legacy providerless logs remain resumable by Claude only. Optimization JSON/HTML reports remain under the skill directory.
 - `.map/mapify.lock.json`: Install manifest/lock — aggregate audit of all MAP-managed files, written by `mapify init` and read by `mapify check-installed`
 - `.map/update-state.json`: gitignored automatic-update attempt/install/pending-refresh state, written atomically
 - `.map/update.lock`: gitignored project-local updater mutex; lock contention is a silent automatic skip and an explicit manual error
@@ -95,6 +95,29 @@ The remainder of this file contains the deeper implementation dive (workflow-spe
 - `.sofa/credentials.lock`: private opt-in SOFA credential-file lock, ignored with the rest of `.sofa/`
 - `.map/<branch>/approval_holds.json` and `.map/<branch>/approval_hold_<id>.md`: Durable human-gate artifacts for pending/decided approval holds
 - `.map/wayfind/<slug>/`: **Repo-level** (not branch-scoped) decision maps for `/map-wayfind`. Holds the canonical `state.json`, regenerated `map.md` and `tickets/*.md` views (DO-NOT-EDIT banner), author-written `resolutions/*.md` (+ `*.human.md` verbatim human answers), and the final `handoff.md`/`handoff.json`. Maps outlive branches and are committed by default.
+
+### Codex parity boundary
+
+The Codex provider ships the same 23 workflow entry points as Claude and nine
+configured roles. Codex skills translate Claude task fan-out into
+`spawn_agent`/`followup_task`; Actor is the sole `workspace-write` role and all
+review/research roles are `read-only`. Lifecycle parity is implemented through
+eight Codex event groups, with post-compaction context delivered by the
+`SessionStart` `compact` matcher. Provider adapters normalize `apply_patch`
+(hook payloads and rollout `custom_tool_call`/`function_call` records),
+`file_change`, `token_count` and `turn.completed` into the same workflow gate,
+memory, and token-accounting engines used by Claude; the Codex gate additionally
+phase-gates Bash writes with an explicit target and leaves opaque commands
+ungated (#164 parity). `apply_patch` header parsing is one shared partial
+(`templates_src/_partials/apply-patch-paths.py.jinja`) with a runtime twin in
+`memory/capture.py`; `codex exec --json` argv and event parsing live in
+`mapify_cli.codex_exec`; provider names and directories in
+`mapify_cli.provider_registry`. The only intentional UI-level gap is
+Claude's command-driven dynamic `statusLine` renderer. Codex does provide the
+project-level `[tui].status_line` setting, but it accepts an ordered list of
+built-in item identifiers rather than a renderer command, so MAP does not wire
+the Claude renderer into it. The context meter and token report remain available
+through hooks and skills.
 
 Claude skill metadata includes `skillClass` in `.claude/skills/skill-rules.json` so the runtime contract is explicit: `task` skills behave like manual slash workflows or opt-in interactive task surfaces, `reference` skills provide inline guidance, and `hybrid` skills combine reference material with declared runtime effects. Today the MAP slash surfaces are `task` skills, including `/map-understand`, whose checklist is transient in the conversation and has no runtime effects; `map-state` is `hybrid` because it documents planning state and ships hooks/scripts that interact with `.map/<branch>/` artifacts, and `map-so-search` is `hybrid` because it ships a script with declared network/credential runtime effects (the opt-in SOFA search; see [Stack Overflow for Agents (SOFA) Integration](#stack-overflow-for-agents-sofa-integration)).
 
@@ -108,8 +131,8 @@ Claude skill metadata includes `skillClass` in `.claude/skills/skill-rules.json`
 - **Persist Artifacts**: Each workflow stage records durable artifacts under `.map/<branch>/`, including specs, blueprints, test contracts, verification summaries, review bundles, learning handoffs, token-budget reports, run-health reports, and retry quarantine state. Research/discovery uses a single namespace: plan-scope discovery is `.map/<branch>/research/plan__discovery.md`, and subtask-scope artifacts are `.map/<branch>/research/<subtask_id>__<kind>.md`; legacy `findings_<branch>.md` files are compatibility fallbacks, not the primary source.
 - **Pause for Human Approval**: Framework components can call `create_approval_hold(kind, reason, request_summary, source, safe_continuation)` from the step runner when a risky action needs an explicit decision. Holds are idempotent by kind+summary, store only redacted summaries, block resume while pending, and transition through `decide_approval_hold` into terminal states (`approved`, `denied`, `expired`, `cancelled`).
 - **Close or Reuse Completed Runs**: Sequential completion now sets `current_step_phase=COMPLETE`, `workflow_status=WORKFLOW_COMPLETE`, and `completed_at` atomically. `map_orchestrator.py archive` retires a completed branch state by renaming `step_state.json` to `step_state.completed-<timestamp>.json`; `initialize_workflow` auto-archives a prior completed run when a new workflow starts on the same branch. For workflows that cannot complete normally (stuck `INITIALIZED` with an empty `subtask_sequence`, failed mid-DECOMPOSE, or otherwise abandoned), `map_orchestrator.py abandon` provides a forcible escape hatch: it retires any workflow regardless of terminal status, renaming the state file to `step_state.abandoned-<timestamp>.json` (or delegating to the archive path if the run is already terminal). After either command the edit gate fail-opens. (#360)
-- **Capture/Recall Memory**: Generated memory hooks capture session scratch records under `.map/<branch>/sessions/scratch/`, finalize them into `.map/<branch>/sessions/<session-id>.md`, and recall branch/session digests at the next session start. `/map-memory-now` can finalize dirty scratches immediately.
-- **Evaluate Skills**: `/map-skill-eval` and `mapify skill-eval` run trigger/cost eval sets through isolated `claude -p` workers, append resumable JSONL rows, aggregate pass/fail and usage, optimize frontmatter descriptions against held-out eval cases, and render stored optimization reports.
+- **Capture/Recall Memory**: Generated memory hooks capture session scratch records under `.map/<branch>/sessions/scratch/`, finalize them into `.map/<branch>/sessions/<session-id>.md`, and recall branch/session digests at the next session start. Codex memory hook files are thin wrappers around the hidden installed-runtime `mapify _memory-hook` adapter, so an isolated `uv tool` installation does not depend on importing `mapify_cli` from the system `python3`. `/map-memory-now` can finalize dirty scratches immediately.
+- **Evaluate Skills**: `/map-skill-eval`, `$map-skill-eval`, and `mapify skill-eval` run trigger/cost eval sets through isolated provider workers (`claude -p` or `codex exec`), append resumable JSONL rows, aggregate pass/fail and usage, optimize frontmatter descriptions against held-out eval cases, and render stored optimization reports.
 - **Audit/Validate**: Maintainers use tests and helper modules such as `python -m mapify_cli.skill_ir ...`, `mapify check`, `mapify doctor`, template-sync tests, artifact-schema tests, workflow-gate tests, and adversarial governance violation fixtures to keep shipped provider surfaces aligned with the documented runtime contract.
 
 ### Automatic update subsystem
@@ -225,7 +248,7 @@ the retained compatibility field.
 - **Generated provider surfaces**: `.claude/skills/`, optional `.claude/commands/` custom-command scaffolding, and `.codex/` are the operational "runtime spec" consumed by providers.
 - **Run artifacts**: `.map/<branch>/` holds the durable record of what happened in a run (what was planned, what was verified, what was learned).
 - **Session memory artifacts**: `.map/<branch>/sessions/` holds finalized cross-session memory digests; `.map/<branch>/sessions/scratch/` is the temporary WAL-like capture area until finalization succeeds.
-- **Skill-eval artifacts**: `.map/eval-runs/<skill>/` stores run JSONL, optimization JSON, and generated HTML report artifacts.
+- **Skill-eval artifacts**: `.map/eval-runs/<skill>/<provider>/` stores provider-scoped run JSONL so `--resume` cannot combine Claude and Codex cells. Providerless legacy JSONL remains readable as Claude data for backward compatibility; optimization JSON and generated HTML reports stay under `.map/eval-runs/<skill>/`.
 - **CLI templates and delivery code**: `src/mapify_cli/templates/` plus `src/mapify_cli/delivery/` define what `mapify init` installs.
 - **Deterministic helpers**: `src/mapify_cli/*` helper modules and `.map/scripts/` templates enforce artifact schemas, workflow state, prompt budgets, SkillIR checks, memory finalization, skill-eval assertions, and prior-stage validation.
 - **Host-path and lock contract**: `src/mapify_cli/_locking.py` owns the `flock_with_state` implementation; `src/mapify_cli/templates/references/host-paths.md` is the shipped user-facing reference for `MAP_*`, `~/.map/`, and lock state-marker semantics.
@@ -398,7 +421,8 @@ overrides a user's own status line and, because `settings.local.json` is not a
 MAP-managed file, introduces no template drift or `.bak` churn on upgrade
 (Claude provider only). The **heartbeat / SSE-keepalive** acceptance item is
 closed as **harness-owned**: MAP's orchestrator is prompt-driven and dispatches
-subagents through Claude Code's Task tool, which the harness keeps alive, so MAP
+subagents through Claude Code's Task tool or Codex `spawn_agent`, whose harness
+keeps the run alive, so MAP
 ships no bespoke keepalive (a genuine crash-resume need would be tracked
 separately as durable checkpointing, not a network heartbeat). Design was
 llm-council-reviewed (conv `585f773b`).
@@ -449,12 +473,12 @@ Actor/research phase or pauses for input. The entire SOFA test suite is mocked
 (Out of scope for this integration: writing/contributing to SOFA, a SOFA MCP
 surface, and rate-limit handling.)
 
-## Decision-Frontier Wayfinding (`/map-wayfind`)
+## Decision-Frontier Wayfinding (`/map-wayfind`, `$map-wayfind`)
 
-A manually-invoked, Claude-only skill for large or foggy efforts where `/map-plan`
+A manually-invoked Claude/Codex skill for large or foggy efforts where `map-plan`
 would force premature decomposition. It resolves the open design decisions on a
 durable, repo-level map **before** planning; if scope is already crisp it off-ramps
-straight to `/map-plan`.
+straight to the provider's `map-plan` entry point.
 
 - **`wayfind_runner.py`** (`.map/scripts/`): a self-contained, **stdlib-only** runner
   (sibling of `map_step_runner.py`, mirroring the `sofa_client.py` pattern) that owns
@@ -857,10 +881,10 @@ MAP Framework implements cognitive architecture inspired by prefrontal cortex fu
 ### Orchestration Model
 
 **Skill-Backed Workflow:**
-- MAP orchestration logic is implemented in skill-backed slash surfaces (`.claude/skills/map-*/SKILL.md`)
+- MAP orchestration logic is implemented in provider skill surfaces (`.claude/skills/map-*/SKILL.md` for Claude, `.agents/skills/map-*/SKILL.md` for Codex)
 - `.claude/commands/` is reserved for user-custom commands; MAP `map-*.md` command files should not be reintroduced
 - NOT a separate agent file
-- When you run `/map-efficient`, the skill surface coordinates the workflow by calling agents sequentially via the Task tool
+- `/map-efficient` in Claude or `$map-efficient` in Codex coordinates agents sequentially through the provider's Task or `spawn_agent`/`followup_task` interface
 
 **Workflow Stages:**
 
@@ -915,7 +939,9 @@ MAP is a hierarchical multi-agent orchestrator, but more agents is not automatic
 
 Why the distinction matters (motivation from the Atlassian Rovo "long-horizon" result, issue #230): Rovo replaced a coordinator→capability-subagent hierarchy with a single-context loop and improved accuracy, because the orchestrator→subagent hop was *pure relay overhead* (one LLM call whose only job was to paraphrase tool results upward). That result does **not** argue for collapsing MAP to one context: MAP's Monitor / Predictor / Evaluator / FinalVerifier are **adversarial / independent-verification** roles where the *separation is the value* — an independent context catches what a single self-reviewing context rationalizes away. Collapsing those would destroy MAP's core benefit. The lesson is the criterion above, applied per hop.
 
-**Audit (ground truth = `subagent_type="…"` dispatch sites in `src/mapify_cli/templates_src/skills/**/SKILL.md.jinja`, not docs).** Every shipped agent classified `independent | relay`:
+**Audit (ground truth = Claude `subagent_type="…"` and Codex
+`agent_type="…"` dispatch sites in `templates_src`, not docs).** Every shipped
+agent is classified `independent | relay`:
 
 | Agent | Dispatched by (`file:line`, jinja source) | Emits | Class |
 |-------|--------------------------------------------|-------|-------|
@@ -927,11 +953,26 @@ Why the distinction matters (motivation from the Atlassian Rovo "long-horizon" r
 | Evaluator | `map-debug:252`, `map-review:299-300` | quality scores + Monitor-severity audit | **Independent** (adversarial) |
 | FinalVerifier | `map-efficient:470`, `map-check:147` | whole-task PASS / REVISE / BLOCK | **Independent** (adversarial) |
 | Reflector | `map-learn:119` | extracted lessons / rules | **Independent** |
-| DocumentationReviewer | *(no skill dispatch — manual `Task(subagent_type="documentation-reviewer")` only)* | docs-vs-source-architecture verdict | **Independent**, *not auto-wired* — intentionally user-dispatchable (see below) |
+| DocumentationReviewer | Claude: manual `Task(subagent_type="documentation-reviewer")`; Codex: `$map-review` via `spawn_agent(agent_type="documentation-reviewer")` | docs-vs-source-architecture verdict | **Independent**; optional in Claude, pipeline-dispatched in Codex |
 
-**Conclusion — no relay hops remain.** Each of the 8 pipeline-dispatched agents emits its own independent verdict; none is a pure relay. The only relay hops the doctrine condemns — the Self-MoA `synthesizer` (which paraphrased 3× Actor/Monitor outputs into one, adding no new verdict) and its `debate-arbiter` sibling — were already collapsed and removed in **PR #240** (commit `17c69bc`); their dispatch never existed in any skill, so they were also orphaned. That satisfies the "measured keep/collapse decision" for the Self-MoA Synthesizer hop named in #230: the decision was *collapse*, already executed.
+**Conclusion — no relay hops remain.** All eight Claude pipeline-dispatched
+agents and all nine Codex pipeline-dispatched agents emit their own independent
+result; none is a pure relay. The only relay hops the doctrine condemns — the
+Self-MoA `synthesizer` (which paraphrased 3× Actor/Monitor outputs into one,
+adding no new verdict) and its `debate-arbiter` sibling — were already collapsed
+and removed in **PR #240** (commit `17c69bc`); their dispatch never existed in
+any skill, so they were also orphaned. That satisfies the "measured
+keep/collapse decision" for the Self-MoA Synthesizer hop named in #230: the
+decision was *collapse*, already executed.
 
-**DocumentationReviewer is a deliberate keep, not dead weight.** It has zero skill-initiated dispatch sites, but — unlike the removed `synthesizer`/`debate-arbiter` — it is **not a relay**: it produces a unique docs-vs-source-architecture verdict (external-URL validation, completeness scoring, consistency checks) that no other agent duplicates. Under the substance rule it *passes* the doctrine; its missing caller is a discoverability gap, not redundancy. It is therefore retained as an **optional, user-dispatchable** agent — invoke manually via `Task(subagent_type="documentation-reviewer", …)`. Wiring it into a pipeline (e.g. `/map-release`) is deferred feature work, out of scope for this docs-and-audit change. Re-evaluate the keep if no manual adoption emerges over the next few releases.
+**DocumentationReviewer is a deliberate keep, not dead weight.** Unlike the
+removed `synthesizer`/`debate-arbiter`, it is **not a relay**: it produces a
+unique docs-vs-source-architecture verdict (external-URL validation,
+completeness scoring, consistency checks) that no other agent duplicates. Codex
+`$map-review` dispatches it as part of the review fan-out. Claude retains it as
+an optional, user-dispatchable agent via
+`Task(subagent_type="documentation-reviewer", …)` until its Claude workflow is
+wired equivalently.
 
 ### .map/ Artifact Specifications
 

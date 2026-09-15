@@ -131,6 +131,8 @@ classification is enforced by `scripts/lint-hooks.py` (in `make lint` /
 | `map-memory-endmark.py` | `SessionEnd` | No | REQUIRE_GUARD | Best-effort 'ended' marker for the session WAL |
 | `map-memory-finalize.py` | `SessionStart` | No | REQUIRE_GUARD | Finalize prior dirty session scratches into digests (claude -p) |
 | `map-memory-recall.py` | `SessionStart` + `UserPromptSubmit` | No | REQUIRE_GUARD | Inject ranked recalled session memory (additionalContext) |
+| `map-memory-session.py` | `SessionStart` (Codex composite) | No | REQUIRE_GUARD | Finalize dirty memory and inject recall in deterministic order |
+| `map-stop.py` | `Stop` (Codex dispatcher) | No | REQUIRE_GUARD | Sequence scrub, checks, token metering, and memory capture |
 
 > The Codex twin `.codex/hooks/workflow-gate.py` is FORBID_GUARD like its
 > Claude counterpart; this inventory covers `.claude/hooks/` only.

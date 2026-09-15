@@ -158,6 +158,12 @@ def _setup_codex_install(project: Path) -> list[str]:
     _write_managed_file(p, "# map-plan\n\nPlan.\n", fenced=True)
     installed.append(".agents/skills/map-plan/SKILL.md")
 
+    # .agents/references/map-output-examples.md (fenced) — shared references
+    # linked from every Codex skill must be tracked like the skills themselves.
+    p = project / ".agents" / "references" / "map-output-examples.md"
+    _write_managed_file(p, "# examples\n", fenced=True)
+    installed.append(".agents/references/map-output-examples.md")
+
     # .codex/agents/actor.toml (fenced)
     p = project / ".codex" / "agents" / "actor.toml"
     _write_managed_file(p, "[agent]\nname = \"actor\"\n", fenced=True)

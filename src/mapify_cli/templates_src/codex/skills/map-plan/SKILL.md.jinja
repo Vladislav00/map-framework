@@ -43,7 +43,7 @@ If **no flag** is present (standard mode), run all steps as written. The Scale A
 Before any step, detect which artifacts already exist AND whether the request matches the existing plan's goal:
 
 ```
-shell_command:
+exec_command:
   cmd: |
     BRANCH=$(git rev-parse --abbrev-ref HEAD | sed -E 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g; s|-{2,}|-|g; s|^-||; s|-$||')
     echo "BRANCH=$BRANCH"
@@ -144,7 +144,7 @@ Pick one outcome:
 Record the decision:
 
 ```
-shell_command:
+exec_command:
   cmd: |
     python3 .map/scripts/map_step_runner.py record_workflow_fit \
       "<direct-edit|map-fast|map-plan>" \
@@ -162,7 +162,7 @@ shell_command:
 **Scale Advisory (standard mode only, when no `--light`/`--deep` flag was given):** After recording a `map-plan` outcome, estimate the task scope and run:
 
 ```
-shell_command:
+exec_command:
   cmd: python3 .map/scripts/classify_scope.py --files ESTIMATED_FILES --lines ESTIMATED_LINES
 ```
 
@@ -185,6 +185,8 @@ Skip if `.map/<branch>/research/plan__discovery.md` already exists AND contains 
 ```
 spawn_agent(
   agent_type="researcher",
+
+  task_name="map_plan_researcher_1",
   message="""Locate the most relevant code for this request and return:
 - 5-15 key file paths (1-line reason each)
 - existing similar implementations and patterns to follow
@@ -226,7 +228,7 @@ Output format:
 Save discovery to the canonical research namespace:
 
 ```
-shell_command:
+exec_command:
   cmd: |
     BRANCH=$(git rev-parse --abbrev-ref HEAD | sed -E 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g; s|-{2,}|-|g; s|^-||; s|-$||')
     python3 .map/scripts/map_step_runner.py save_research "$BRANCH" plan discovery << 'DISCOVERY_EOF'
@@ -321,7 +323,7 @@ Please answer both before I proceed.
 After answers are collected, write the spec:
 
 ```
-shell_command:
+exec_command:
   cmd: |
     BRANCH=$(git rev-parse --abbrev-ref HEAD | sed -E 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g; s|-{2,}|-|g; s|^-||; s|-$||')
     mkdir -p .map/${BRANCH}
@@ -425,10 +427,12 @@ Populate from user requirements and discovery findings:
 ```
 spawn_agent(
   agent_type="monitor",
+
+  task_name="map_plan_monitor_2",
   message="""You are reviewing a SPECIFICATION (not code). Act as Devil's Advocate.
 
 Read the spec at: .map/<branch>/spec_<branch>.md
-(Use shell_command to cat the file.)
+(Use exec_command to cat the file.)
 
 Check for:
 1. Race conditions / concurrency gaps — shared resources without defined conflict resolution?
@@ -460,7 +464,7 @@ If HIGH-severity issues exist: list them clearly — do not output "SPEC APPROVE
 ## Step 3: Create Branch Directory
 
 ```
-shell_command:
+exec_command:
   cmd: |
     BRANCH=$(git rev-parse --abbrev-ref HEAD | sed -E 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g; s|-{2,}|-|g; s|^-||; s|-$||')
     mkdir -p .map/${BRANCH}
@@ -492,11 +496,13 @@ Before decomposition, dispatch a monitor agent to review the spec and discovery 
 ```
 spawn_agent(
   agent_type="monitor",
+
+  task_name="map_plan_monitor_3",
   message="""You are reviewing a SPECIFICATION for architecture quality (not code). DEEP mode.
 
 Read the spec at: .map/<branch>/spec_<branch>.md
 Read deep discovery at: .map/<branch>/research/plan__deep_discovery.md (if present)
-(Use shell_command to cat both files.)
+(Use exec_command to cat both files.)
 
 Check for:
 1. Component boundary clarity — are module/service responsibilities well-defined and non-overlapping?
@@ -527,13 +533,15 @@ If no CRITICAL or HIGH findings: output "ARCHITECTURE APPROVED" at the end.
 ```
 spawn_agent(
   agent_type="decomposer",
+
+  task_name="map_plan_decomposer_4",
   message="""Break down this task into atomic, testable subtasks.
 
 USER REQUEST:
 <paste user_requirements here>
 
 SPEC FILE: .map/<branch>/spec_<branch>.md
-(Cat the file with shell_command to read it.)
+(Cat the file with exec_command to read it.)
 
 DISCOVERY: .map/<branch>/research/plan__discovery.md (or legacy .map/<branch>/findings_<branch>.md fallback if it exists and has not yet been migrated)
 
@@ -592,7 +600,7 @@ Return structured JSON:
 Save the decomposer output as `.map/<branch>/blueprint.json`. This file is required by `$map-efficient` for parallel wave computation.
 
 ```
-shell_command:
+exec_command:
   cmd: |
     BRANCH=$(git rev-parse --abbrev-ref HEAD | sed -E 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g; s|-{2,}|-|g; s|^-||; s|-$||')
     cat > .map/${BRANCH}/blueprint.json << 'BLUEPRINT_EOF'
@@ -613,7 +621,7 @@ After writing `blueprint.json`, run this deterministic check. If it reports an
 invalid blueprint, re-run Step 4 (the decomposer) BEFORE proceeding to Step 5.5.
 
 ```
-shell_command:
+exec_command:
   cmd: |
     python3 .map/scripts/map_step_runner.py validate_blueprint_contract
 ```
@@ -652,7 +660,7 @@ If gaps are found, update the decomposition before proceeding.
 ## Step 6: Create Human-Readable Plan
 
 ```
-shell_command:
+exec_command:
   cmd: |
     BRANCH=$(git rev-parse --abbrev-ref HEAD | sed -E 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g; s|-{2,}|-|g; s|^-||; s|-$||')
     cat > .map/${BRANCH}/task_plan_${BRANCH}.md << 'PLAN_EOF'
@@ -719,10 +727,10 @@ PLAN_EOF
 If the spec has a `## Constraints` section with non-null `scope_glob`, validate before finalizing the planning artifacts:
 
 ```
-shell_command:
+exec_command:
   cmd: |
     SCOPE_GLOB="<value from spec>"
-    if echo "$SCOPE_GLOB" | grep -qE '(\.\.)|^/|\{'; then
+    if printf '%s' "$SCOPE_GLOB" | grep -qE '(\.\.)|^/|\{'; then
       echo "ERROR: Invalid scope_glob '$SCOPE_GLOB'. Must be relative, no '..' or brace expansion."
       exit 1
     fi
@@ -749,7 +757,7 @@ Do **NOT** create `step_state.json` in `$map-plan`.
 The execution state must be initialized later by:
 
 ```
-shell_command:
+exec_command:
   cmd: python3 .map/scripts/map_orchestrator.py resume_from_plan
 ```
 
@@ -758,10 +766,10 @@ That runtime bootstrap comes from task_plan_<branch>.md and blueprint.json, not 
 Record artifacts in the manifest:
 
 ```
-shell_command:
+exec_command:
   cmd: |
     PLAN_ARTIFACTS_RESULT=$(python3 .map/scripts/map_step_runner.py record_plan_artifacts)
-    echo "$PLAN_ARTIFACTS_RESULT"
+    printf '%s\n' "$PLAN_ARTIFACTS_RESULT"
     PLAN_APPROVAL_HOLD_ID=$(printf '%s' "$PLAN_ARTIFACTS_RESULT" | jq -r '.plan_approval_hold_id // empty')
 ```
 
@@ -774,7 +782,7 @@ shell_command:
 Print a clear checkpoint:
 
 ```
-shell_command:
+exec_command:
   cmd: |
     BRANCH=$(git rev-parse --abbrev-ref HEAD | sed -E 's|/|-|g; s|[^a-zA-Z0-9_.-]|-|g; s|-{2,}|-|g; s|^-||; s|-$||')
     echo "==================================================="

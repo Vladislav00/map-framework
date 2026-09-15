@@ -65,16 +65,22 @@ mapify init . --provider codex
 codex
 ```
 
-Then enable the Codex hook: run `/hooks`, select `PreToolUse`, press `t` to toggle on, then `Esc`. If your Codex version does not support the `hooks` feature key yet, start with `codex --enable codex_hooks` or upgrade first.
+The generated `.codex/config.toml` enables hooks. On first use, review and trust
+the project hook configuration when Codex prompts you; `/hooks` shows the eight
+installed lifecycle event groups.
 
 **3. Run the loop**
 
+Claude Code:
+
 ```text
-/map-plan      define the behavior and split the task
-/map-efficient implement the approved plan
-/map-check
-/map-review
-/map-learn
+/map-plan → /map-efficient → /map-check → /map-review → /map-learn
+```
+
+Codex CLI:
+
+```text
+$map-plan → $map-efficient → $map-check → $map-review → $map-learn
 ```
 
 That's the whole golden path.
@@ -86,7 +92,9 @@ That's the whole golden path.
 - **Too foggy to plan?** `/map-wayfind` resolves open design decisions one at a time on a durable map, then hands settled decisions to `/map-plan`.
 - **Want one entry point?** `/map-auto` routes and drives the chain autonomously; hard-stops only on `dangerous_action`/`safety_guardrail` holds.
 
-> Codex CLI users invoke the same skills with `$`: `$map-plan`, `$map-efficient`, `$map-check`. See the [Usage Guide](docs/USAGE.md#codex-cli-provider).
+> Codex CLI ships the same 23 MAP skill entry points and invokes them with `$`:
+> `$map-plan`, `$map-efficient`, `$map-check`, and so on. See the
+> [Usage Guide](docs/USAGE.md#codex-cli-provider).
 
 **Framework updates.** Automatic stable updates are enabled by default. Normal
 MAP skills check at most once per project every 24 hours, apply eligible patch
@@ -188,7 +196,14 @@ Predictor      → analyzes impact for risky changes
 Learner        → captures reusable project memory
 ```
 
-For Claude Code, MAP slash surfaces live in `.claude/skills/map-*/SKILL.md` files created by `mapify init`. For Codex CLI, `mapify init . --provider codex` creates `.agents/skills/`, `.codex/agents/`, `.codex/config.toml`, hooks, and shared `.map/scripts/`.
+For Claude Code, MAP slash surfaces live in `.claude/skills/map-*/SKILL.md` files
+created by `mapify init`. For Codex CLI, `mapify init . --provider codex` creates
+the matching 23 `.agents/skills/` entries, nine `.codex/agents/*.toml` roles,
+eight lifecycle event groups under `.codex/hooks.json`, and the same shared
+`.map/scripts/` runtime. The only provider-specific UI exception is Claude's
+command-driven dynamic status-line renderer. Codex supports project-level
+`[tui].status_line`, but only as an ordered list of built-in item identifiers,
+so MAP does not install the Claude renderer there.
 
 MAP is inspired by the [MAP cognitive architecture](https://github.com/Shanka123/MAP) (Nature Communications, 2025), which reported a 74% improvement on planning tasks. The CLI turns that idea into a practical software-development workflow.
 

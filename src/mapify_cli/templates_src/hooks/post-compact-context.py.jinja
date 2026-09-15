@@ -226,8 +226,13 @@ def offloaded_outputs_pointer(branch: str, branch_dir: Path) -> str | None:
 
 
 def main() -> None:
+    hook_event_name = "SessionStart"
     try:
-        json.load(sys.stdin)
+        payload = json.load(sys.stdin)
+        if isinstance(payload, dict):
+            incoming_event = payload.get("hook_event_name")
+            if isinstance(incoming_event, str) and incoming_event:
+                hook_event_name = incoming_event
     except json.JSONDecodeError:
         pass
 
@@ -285,7 +290,7 @@ def main() -> None:
 
     result = {
         "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
+            "hookEventName": hook_event_name,
             "additionalContext": "\n".join(parts),
         }
     }

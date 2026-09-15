@@ -88,25 +88,42 @@ def _copy_tree(
 
 
 _EXEC_SUFFIXES = frozenset((".py", ".sh"))
-_CODEX_WORKFLOW_GATE_PATH = ".codex/hooks/workflow-gate.py"
 
 
-def _is_codex_workflow_gate_hook(hook: Any) -> bool:
-    """Return True for MAP's managed Codex workflow-gate command hook."""
+def _managed_codex_hook_names(hooks_dir_src: Path) -> frozenset[str]:
+    """Names of the scripts mapify ships into .codex/hooks/ — the MAP-owned set."""
+    if not hooks_dir_src.is_dir():
+        return frozenset()
+    return frozenset(
+        path.name for path in hooks_dir_src.iterdir() if path.suffix in _EXEC_SUFFIXES
+    )
+
+
+def _is_map_managed_codex_hook(hook: Any, managed_names: frozenset[str]) -> bool:
+    """True when *hook* runs a script mapify ships into .codex/hooks/.
+
+    Only shipped names match: a project-owned script that also lives in
+    .codex/hooks/ (e.g. custom-policy.py) is preserved across reinstall.
+    Matching MAP hooks are dropped and re-added from the template so a changed
+    registration cannot accumulate a stale duplicate.
+    """
     if not isinstance(hook, dict):
         return False
     command = hook.get("command")
-    return isinstance(command, str) and _CODEX_WORKFLOW_GATE_PATH in command
+    if not isinstance(command, str):
+        return False
+    return any(f".codex/hooks/{name}" in command for name in managed_names)
 
 
 def _merge_codex_hook_entries(
     existing_entries: Any,
     template_entries: Any,
+    managed_names: frozenset[str],
 ) -> list[Any]:
     """Merge MAP hook entries into existing Codex hook entries.
 
-    Existing project hooks are preserved. MAP-owned workflow-gate command hooks
-    are refreshed from the template and de-duplicated.
+    Existing project hooks are preserved. MAP-owned command hooks (any script
+    in *managed_names*) are refreshed from the template and de-duplicated.
     """
     merged_entries: list[Any] = []
     if isinstance(existing_entries, list):
@@ -121,7 +138,9 @@ def _merge_codex_hook_entries(
                 continue
 
             cleaned_hooks = [
-                hook for hook in raw_hooks if not _is_codex_workflow_gate_hook(hook)
+                hook
+                for hook in raw_hooks
+                if not _is_map_managed_codex_hook(hook, managed_names)
             ]
             if not cleaned_hooks and len(cleaned_hooks) != len(raw_hooks):
                 continue
@@ -169,6 +188,7 @@ def _merge_codex_hook_entries(
 def _merge_codex_hooks_json(
     existing_data: dict[str, Any] | None,
     template_data: dict[str, Any],
+    managed_names: frozenset[str],
 ) -> dict[str, Any]:
     """Return Codex-valid hooks.json containing only the top-level hooks key."""
     existing_hooks = existing_data.get("hooks") if existing_data else None
@@ -183,6 +203,7 @@ def _merge_codex_hooks_json(
             merged_hooks[event_name] = _merge_codex_hook_entries(
                 merged_hooks.get(event_name),
                 template_entries,
+                managed_names,
             )
 
     return {"hooks": merged_hooks}
@@ -196,7 +217,7 @@ def _load_json_object(path: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _install_codex_hooks_json(src: Path, dst: Path) -> None:
+def _install_codex_hooks_json(src: Path, dst: Path, hooks_dir_src: Path) -> None:
     """Install .codex/hooks.json without MAP metadata and merge project hooks."""
     template_data = _load_json_object(src)
     if template_data is None:
@@ -209,7 +230,9 @@ def _install_codex_hooks_json(src: Path, dst: Path) -> None:
         _assert_safe_dest(dst)
         existing_data = _load_json_object(dst)
 
-    merged = _merge_codex_hooks_json(existing_data, template_data)
+    merged = _merge_codex_hooks_json(
+        existing_data, template_data, _managed_codex_hook_names(hooks_dir_src)
+    )
     _atomic_write(dst, json.dumps(merged, indent=2, ensure_ascii=False) + "\n")
 
 
@@ -279,7 +302,9 @@ def create_codex_files(project_path: Path) -> dict[str, int]:
             entry = skill_catalog.get(skill_name, {})
             requires_block = _extract_requires_block(skill_name, entry)
 
-            req_skills = entry.get("requires-skills") if isinstance(entry, dict) else None
+            req_skills = (
+                entry.get("requires-skills") if isinstance(entry, dict) else None
+            )
             if isinstance(req_skills, list) and req_skills:
                 _warn_requires_skills(skill_name, req_skills)
 
@@ -294,6 +319,16 @@ def create_codex_files(project_path: Path) -> dict[str, int]:
             counts["skills"] += _copy_tree(skill_dir, skill_dst, version)
 
         _prune_catalog_entries(agents_dir / "skills" / "skill-rules.json", skipped)
+
+    # Provider-neutral references used by Codex skills. They intentionally live
+    # under .agents/references so ../../references links from each skill resolve.
+    references_src = codex_templates / "references"
+    if references_src.exists():
+        counts["docs"] += _copy_tree(
+            references_src,
+            agents_dir / "references",
+            version,
+        )
 
     # ------------------------------------------------------------------
     # 2. Agents (*.toml) — watched (fence-aware)
@@ -322,7 +357,9 @@ def create_codex_files(project_path: Path) -> dict[str, int]:
     # ------------------------------------------------------------------
     hooks_json_src = codex_templates / "hooks.json"
     if hooks_json_src.exists():
-        _install_codex_hooks_json(hooks_json_src, codex_dir / "hooks.json")
+        _install_codex_hooks_json(
+            hooks_json_src, codex_dir / "hooks.json", codex_templates / "hooks"
+        )
         counts["hooks"] += 1
 
     hooks_dir_src = codex_templates / "hooks"

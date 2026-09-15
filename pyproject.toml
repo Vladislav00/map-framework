@@ -97,6 +97,10 @@ include = [
 ignore_missing_imports = false
 exclude = [
     "src/mapify_cli/templates/map/scripts/",
+    # templates/codex/** re-renders Claude skill scripts under the same
+    # basenames (sofa_search.py); mypy maps both copies onto one module name.
+    # Exclude only the Codex copies -- pyright still checks both trees.
+    "src/mapify_cli/templates/codex/",
     "tests/skills_eval/fixtures/whole_skill/",
 ]
 

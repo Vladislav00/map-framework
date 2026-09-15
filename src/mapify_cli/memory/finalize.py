@@ -1,6 +1,6 @@
 """Lazy LLM digest finalization for the MAP Framework memory subsystem.
 
-Public API: ``finalize_dirty(incoming_sid, project_dir, timeout)``
+Public API: ``finalize_dirty(incoming_sid, project_dir, timeout, provider)``
 
 Called from the SessionStart hook shim (ST-006) to checkpoint all prior
 dirty scratch WAL files.  Each candidate scratch is finalized under a
@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from mapify_cli._locking import LockState, LockTimeoutError, flock_with_state
+from mapify_cli.codex_exec import codex_exec_argv, parse_codex_exec_events
 from mapify_cli.memory.capture import _resolve_branch
 from mapify_cli.memory.digest_schema import (
     DIGEST_FRONTMATTER_FIELDS,
@@ -40,6 +41,7 @@ from mapify_cli.memory.digest_schema import (
     redact_text,
     sanitize_value,
 )
+from mapify_cli.provider_registry import require_provider
 from mapify_cli.token_budget import TokenUsage
 
 logger = logging.getLogger(__name__)
@@ -169,19 +171,29 @@ def _build_frontmatter(
     # DIGEST_FRONTMATTER_FIELDS order:
     # session_id, branch, date, slug, files_touched, decisions, findings, ticket_refs
     lines: list[str] = ["---"]
-    lines.append(f"{DIGEST_FRONTMATTER_FIELDS[0]}: {_yaml_str(sanitize_value(session_id))}")
+    lines.append(
+        f"{DIGEST_FRONTMATTER_FIELDS[0]}: {_yaml_str(sanitize_value(session_id))}"
+    )
     lines.append(f"{DIGEST_FRONTMATTER_FIELDS[1]}: {_yaml_str(sanitize_value(branch))}")
     lines.append(f"{DIGEST_FRONTMATTER_FIELDS[2]}: {_yaml_str(date_iso)}")
     lines.append(f"{DIGEST_FRONTMATTER_FIELDS[3]}: {_yaml_str(sanitize_value(slug))}")
-    lines.append(f"{DIGEST_FRONTMATTER_FIELDS[4]}: {_yaml_list([_clean(str(f)) for f in files_touched])}")
+    lines.append(
+        f"{DIGEST_FRONTMATTER_FIELDS[4]}: {_yaml_list([_clean(str(f)) for f in files_touched])}"
+    )
     # decisions/findings are LLM output — sanitize+redact string items the same
     # way as every other content field so embedded newlines are flattened (a raw
     # newline in a value would otherwise corrupt the frontmatter boundary and
     # make recall._parse_digest drop the whole digest) and any leaked secret is
     # stripped at the value level.
-    lines.append(f"{DIGEST_FRONTMATTER_FIELDS[5]}: {_yaml_list([_clean(d) if isinstance(d, str) else d for d in decisions])}")
-    lines.append(f"{DIGEST_FRONTMATTER_FIELDS[6]}: {_yaml_list([_clean(f) if isinstance(f, str) else f for f in findings])}")
-    lines.append(f"{DIGEST_FRONTMATTER_FIELDS[7]}: {_yaml_list([_clean(str(r)) for r in ticket_refs])}")
+    lines.append(
+        f"{DIGEST_FRONTMATTER_FIELDS[5]}: {_yaml_list([_clean(d) if isinstance(d, str) else d for d in decisions])}"
+    )
+    lines.append(
+        f"{DIGEST_FRONTMATTER_FIELDS[6]}: {_yaml_list([_clean(f) if isinstance(f, str) else f for f in findings])}"
+    )
+    lines.append(
+        f"{DIGEST_FRONTMATTER_FIELDS[7]}: {_yaml_list([_clean(str(r)) for r in ticket_refs])}"
+    )
     lines.append("---")
     return "\n".join(lines) + "\n"
 
@@ -260,6 +272,42 @@ def _parse_claude_output(
     return "", str(raw_result), [], []
 
 
+def _parse_codex_output(
+    stdout: str,
+) -> tuple[str, str, list[object], list[object], dict[str, Any]]:
+    """Parse ``codex exec --json`` JSONL into digest fields and usage.
+
+    The last completed ``agent_message`` is the response; ``turn.completed``
+    carries token usage (see :mod:`mapify_cli.codex_exec`).
+    """
+    parsed = parse_codex_exec_events(stdout)
+    if not parsed.response:
+        raise ValueError("codex exec produced no completed agent message")
+    try:
+        inner = json.loads(_strip_code_fence(parsed.response))
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("codex agent message is not valid digest JSON") from exc
+    if not isinstance(inner, dict):
+        raise ValueError("codex digest response must be a JSON object")
+    title_value = inner.get("title")
+    body_value = inner.get("body")
+    decisions_value = inner.get("decisions")
+    findings_value = inner.get("findings")
+    if not isinstance(title_value, str) or not isinstance(body_value, str):
+        raise ValueError("codex digest title and body must be strings")
+    if not isinstance(decisions_value, list) or not isinstance(findings_value, list):
+        raise ValueError("codex digest decisions and findings must be arrays")
+    if not all(isinstance(value, str) for value in decisions_value + findings_value):
+        raise ValueError("codex digest decisions and findings must contain strings")
+    return (
+        title_value,
+        body_value or title_value,
+        decisions_value,
+        findings_value,
+        dict(parsed.usage),
+    )
+
+
 def _append_cost_log(
     cost_log_path: Path,
     *,
@@ -276,7 +324,9 @@ def _append_cost_log(
     tu = TokenUsage(
         input_tokens=int(usage.get("input_tokens", 0) or 0),
         cache_read_input_tokens=int(usage.get("cache_read_input_tokens", 0) or 0),
-        cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens", 0) or 0),
+        cache_creation_input_tokens=int(
+            usage.get("cache_creation_input_tokens", 0) or 0
+        ),
     )
     output_tokens = int(usage.get("output_tokens", 0) or 0)
 
@@ -305,6 +355,8 @@ def _finalize_one(
     sessions_dir: Path,
     branch: str,
     timeout: int,
+    provider: str,
+    project_dir: Path,
     lock_timeout_s: float = 10.0,
 ) -> bool:
     """Finalize a single dirty scratch candidate.
@@ -319,7 +371,9 @@ def _finalize_one(
 
     lock_name = _lock_name(branch)
     try:
-        with flock_with_state(lock_name, timeout_s=lock_timeout_s, initial_state=LockState.IN_PROGRESS):
+        with flock_with_state(
+            lock_name, timeout_s=lock_timeout_s, initial_state=LockState.IN_PROGRESS
+        ):
             # ---- Double-checked locking (VC3/INV-5): re-read inside the lock ----
             if finalized_marker.exists():
                 # Another process finalized this sid while we waited for the lock.
@@ -377,8 +431,12 @@ def _finalize_one(
             # ---- Build prompt (security: scratch turns only, no file bodies) --
             prompt_text = _build_prompt(turns)
 
-            # ---- Invoke claude -p (VC4/HC-5/AC-13) ----------------------------
-            argv = ["claude", "-p", "--output-format", "json"]
+            # ---- Invoke the selected provider non-interactively ---------------
+            argv = (
+                codex_exec_argv()
+                if provider == "codex"
+                else ["claude", "-p", "--output-format", "json"]
+            )
             env = {**os.environ, "MAP_INVOKED_BY": "memory-finalize"}
 
             t_start = time.monotonic()
@@ -389,13 +447,14 @@ def _finalize_one(
                     capture_output=True,
                     text=True,
                     timeout=timeout,
+                    cwd=project_dir,
                     env=env,
                     check=False,
                 )
                 duration_s = time.monotonic() - t_start
             except subprocess.TimeoutExpired:
                 # HC-5: leave scratch unfinalized for retry; clean up any tmp.
-                logger.warning("finalize: claude -p timed out for sid=%s", sid)
+                logger.warning("finalize: %s timed out for sid=%s", provider, sid)
                 try:
                     tmp_path.unlink(missing_ok=True)
                 except OSError:
@@ -411,7 +470,10 @@ def _finalize_one(
 
             if result.returncode != 0:
                 logger.warning(
-                    "finalize: claude -p returned %d for sid=%s", result.returncode, sid
+                    "finalize: %s returned %d for sid=%s",
+                    provider,
+                    result.returncode,
+                    sid,
                 )
                 try:
                     tmp_path.unlink(missing_ok=True)
@@ -421,14 +483,27 @@ def _finalize_one(
 
             # ---- Parse output (VC4) -------------------------------------------
             stdout = result.stdout or ""
-            usage: dict[str, Any]
-            try:
-                outer = json.loads(stdout)
-                usage = dict(outer.get("usage") or {})
-            except (json.JSONDecodeError, AttributeError):
-                usage = {}
-
-            title, body, decisions, findings = _parse_claude_output(stdout)
+            if provider == "codex":
+                try:
+                    title, body, decisions, findings, usage = _parse_codex_output(
+                        stdout
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "finalize: invalid codex output for sid=%s: %s", sid, exc
+                    )
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    return False
+            else:
+                try:
+                    outer = json.loads(stdout)
+                    usage = dict(outer.get("usage") or {})
+                except (json.JSONDecodeError, AttributeError):
+                    usage = {}
+                title, body, decisions, findings = _parse_claude_output(stdout)
 
             # ---- Derive slug (spec LOW-11) ------------------------------------
             # Prefer the dedicated `title` key the prompt asks for; fall back to
@@ -551,6 +626,7 @@ def finalize_dirty(
     incoming_sid: str | None,
     project_dir: Path | str,
     timeout: int = 60,
+    provider: str = "claude",
 ) -> int:
     """Finalize all dirty prior-session scratch WAL files.
 
@@ -583,6 +659,8 @@ def finalize_dirty(
         Number of digests written (empty scratches are finalized but not
         counted).
     """
+    require_provider(provider)
+
     project_dir = Path(project_dir)
     branch = _resolve_branch(project_dir)
     sessions_dir = project_dir / ".map" / branch / "sessions"
@@ -615,6 +693,8 @@ def finalize_dirty(
             sessions_dir=sessions_dir,
             branch=branch,
             timeout=timeout,
+            provider=provider,
+            project_dir=project_dir,
         ):
             count += 1
 

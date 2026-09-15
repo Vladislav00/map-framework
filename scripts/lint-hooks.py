@@ -75,6 +75,8 @@ REQUIRE_GUARD = {
     "map-memory-endmark.py",
     "map-memory-finalize.py",
     "map-memory-recall.py",
+    "map-memory-session.py",
+    "map-stop.py",
 }
 FORBID_GUARD = {
     "safety-guardrails.py",

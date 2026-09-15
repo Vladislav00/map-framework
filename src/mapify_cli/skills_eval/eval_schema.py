@@ -105,6 +105,7 @@ class EvalResultRecord:
     triggered_skill: str | None
     token_usage: TokenUsage | None
     duration_s: float
+    provider: str | None = None
     assertions_passed: list[str] = field(default_factory=list)
     assertions_failed: list[str] = field(default_factory=list)
     raw_output: str = ""
@@ -128,6 +129,7 @@ class EvalResultRecord:
                 else None
             ),
             "duration_s": self.duration_s,
+            "provider": self.provider,
             "assertions_passed": list(self.assertions_passed),
             "assertions_failed": list(self.assertions_failed),
             "raw_output": self.raw_output,
@@ -158,6 +160,7 @@ class EvalResultRecord:
             triggered_skill=d.get("triggered_skill"),
             token_usage=token_usage,
             duration_s=float(d["duration_s"]),
+            provider=(str(d["provider"]) if d.get("provider") is not None else None),
             assertions_passed=list(d.get("assertions_passed", [])),
             assertions_failed=list(d.get("assertions_failed", [])),
             raw_output=d.get("raw_output", ""),

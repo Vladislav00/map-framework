@@ -5,6 +5,7 @@ This hook replaces the old block-secrets.py and block-dangerous.sh hooks.
 Tests file blocking and dangerous command blocking.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -35,6 +36,19 @@ def run_hook_file(tool_name: str, file_path: str) -> tuple[int, str, str]:
 def run_hook_bash(command: str) -> tuple[int, str, str]:
     """Execute the hook with given bash command."""
     input_data = {"tool_name": "Bash", "tool_input": {"command": command}}
+    result = subprocess.run(
+        [sys.executable, str(HOOK_PATH)],
+        input=json.dumps(input_data),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, result.stdout, result.stderr
+
+
+def run_hook_apply_patch(command: str) -> tuple[int, str, str]:
+    """Execute the hook with a Codex apply_patch payload."""
+    input_data = {"tool_name": "apply_patch", "tool_input": {"command": command}}
     result = subprocess.run(
         [sys.executable, str(HOOK_PATH)],
         input=json.dumps(input_data),
@@ -188,7 +202,7 @@ class TestPrivateKeys:
 
 
 class TestSafePathPrefixes:
-    """Test that files in known safe directories are allowed even if name matches."""
+    """Safe directories are trusted as-is by default; strict mode is opt-in."""
 
     @pytest.mark.parametrize(
         "path",
@@ -196,12 +210,59 @@ class TestSafePathPrefixes:
             "src/config/secrets.yaml",
             "tests/fixtures/credentials.json",
             ".claude/hooks/safety-guardrails.py",
+            "src/config/settings.yaml",
         ],
     )
     def test_safe_prefix_allowed(self, path):
+        """Default: a known safe directory wins even for a sensitive basename."""
         exit_code, stdout, _ = run_hook_file("Read", path)
         assert exit_code == 0
         assert _parse_stdout(stdout) == {}
+
+    @staticmethod
+    def _run_in(project_dir: Path, tool_name: str, tool_input: dict) -> dict:
+        result = subprocess.run(
+            [sys.executable, str(HOOK_PATH)],
+            input=json.dumps({"tool_name": tool_name, "tool_input": tool_input}),
+            capture_output=True,
+            text=True,
+            env={**os.environ, "CLAUDE_PROJECT_DIR": str(project_dir)},
+            check=False,
+        )
+        assert result.returncode == 0
+        return _parse_stdout(result.stdout)
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "src/.env",
+            "tests/fixtures/credentials.json",
+            "src/config/private-key.pem",
+        ],
+    )
+    def test_strict_sensitive_names_denies_inside_safe_prefix(self, tmp_path, path):
+        """Opt-in strict mode: the basename blocklist runs before the safe prefixes."""
+        (tmp_path / ".map").mkdir()
+        (tmp_path / ".map" / "config.yaml").write_text(
+            "strict_sensitive_names: true\n", encoding="utf-8"
+        )
+        patch = "*** Begin Patch\n" f"*** Update File: {path}\n" "*** End Patch\n"
+        _assert_denied(self._run_in(tmp_path, "apply_patch", {"command": patch}))
+        _assert_denied(self._run_in(tmp_path, "Write", {"file_path": path}))
+        # Ordinary names in the same directories stay allowed.
+        assert self._run_in(tmp_path, "Write", {"file_path": "src/config/settings.yaml"}) == {}
+
+    def test_strict_sensitive_names_ignores_explicit_prefixes(self, tmp_path):
+        """In strict mode an operator allowlist does not mask sensitive basenames."""
+        (tmp_path / ".map").mkdir()
+        (tmp_path / ".map" / "config.yaml").write_text(
+            "strict_sensitive_names: true\nsafe_path_prefixes:\n  - tests/fixtures/\n",
+            encoding="utf-8",
+        )
+        _assert_denied(
+            self._run_in(tmp_path, "Read", {"file_path": "tests/fixtures/credentials.json"})
+        )
+        assert self._run_in(tmp_path, "Read", {"file_path": "tests/fixtures/example.json"}) == {}
 
 
 # =============================================================================

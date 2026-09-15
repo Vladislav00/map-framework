@@ -23,11 +23,15 @@ ENFORCEMENT:
 CONSTRAINTS (from step_state.json):
   - scope_glob: restrict edits to matching file patterns
 
-KNOWN LIMITATION (#164): this gate intercepts Edit/Write/MultiEdit only.
-File writes performed via Bash (``cat >``, ``tee``, ``sed -i``) are NOT
-gated. Closing that bypass requires parsing shell write-targets and is
-deferred to avoid false positives that would block legitimate Bash in the
-many repos this hook ships into.
+Bash commands whose write target is explicit (``>``/``>>`` redirection,
+``tee``, ``sed -i``, ``cp``/``mv``/``install``, ``dd of=``, ``sort``/``yq``
+``-o``, ``git --output``) and Codex ``apply_patch`` headers are normalized to
+target paths and pass through the same phase gate. A Bash command with no
+extractable target is NOT gated (same known limitation as the Claude twin,
+#164): the orchestrator itself runs ``VAR=$(python3 .map/scripts/...)``,
+``pytest`` and similar commands in every phase, so opaque commands cannot be
+denied without deadlocking the workflow. An explicit target that still needs
+shell expansion (``> "$FILE"``, globs) is denied outside editing phases.
 
 Exit code 0 always (fail-open on errors).
 """
@@ -82,12 +86,47 @@ if sys.version_info < (3, 11):  # noqa: UP036
 import json
 import os
 import re
+import shlex
 import sys
 from fnmatch import fnmatch
 from pathlib import Path
 
-EDITING_TOOLS = {"Edit", "Write", "MultiEdit"}
+# --- shared: Codex apply_patch target extraction (rendered from
+# templates_src/_partials/apply-patch-paths.py.jinja; edit the partial) ---
+_APPLY_PATCH_HEADER_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$", re.MULTILINE
+)
+_APPLY_PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def extract_apply_patch_paths(payload: object) -> list[str]:
+    """Return the file targets named by explicit Codex apply_patch headers.
+
+    Accepts the raw patch text or the tool_input mapping Codex hands to hooks
+    (patch text under ``command``, ``input`` or ``patch``). Only explicit
+    ``*** Add/Update/Delete File:`` and ``*** Move to:`` headers count; paths
+    are never inferred from added or removed content. Order is preserved and
+    duplicates are dropped.
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("command") or payload.get("input") or payload.get("patch")
+    if not isinstance(payload, str):
+        return []
+    paths = [m.group(1).strip() for m in _APPLY_PATCH_HEADER_RE.finditer(payload)]
+    paths += [m.group(1).strip() for m in _APPLY_PATCH_MOVE_RE.finditer(payload)]
+    return list(dict.fromkeys(p for p in paths if p))
+
+
+EDITING_TOOLS = {"Edit", "Write", "MultiEdit", "apply_patch", "Bash"}
 PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT_DIR", os.getcwd())).resolve()
+# Bash writers whose target is explicit in argv. One table for both
+# target extraction and the writer classifier — they must agree.
+_EVERY_ARG_WRITERS = frozenset({"tee", "touch", "mkdir", "rm", "unlink", "truncate"})
+_LAST_ARG_WRITERS = frozenset({"cp", "mv", "install"})
+_IN_PLACE_WRITERS = frozenset({"sed", "perl"})
+_OUTPUT_OPTION_WRITERS = frozenset({"sort", "yq"})
+_SHELL_SEPARATORS = frozenset({"&&", "||", ";", "|"})
+_FILE_REDIRECTS = frozenset({">", ">>", ">|", "&>", "<>"})
 
 # Phases where Edit/Write is expected (Actor applies code)
 EDITING_PHASES = {"ACTOR", "APPLY", "TEST_WRITER"}
@@ -181,7 +220,119 @@ def extract_target_file_paths(tool_call: dict) -> list[str]:
                 if isinstance(fp, str) and fp.strip():
                     paths.append(fp)
 
-    return paths
+    command = tool_input.get("command")
+    if tool_call.get("tool_name") == "apply_patch":
+        paths.extend(extract_apply_patch_paths(tool_input))
+
+    if tool_call.get("tool_name") == "Bash" and isinstance(command, str):
+        paths.extend(_bash_write_targets(command))
+
+    return list(dict.fromkeys(paths))
+
+
+def _is_in_place_option(option: str) -> bool:
+    """Return True for short and GNU long in-place mutation options."""
+    return option.startswith(("-i", "--in-place=")) or option == "--in-place"
+
+
+def _writes_via_output_option(args: list[str], *, in_place: bool = False) -> bool:
+    """True when argv carries -o/--output[=PATH] (or -i when *in_place*)."""
+    flags = {"-o", "--output"} | ({"-i"} if in_place else set())
+    return any(arg in flags or arg.startswith("--output=") for arg in args)
+
+
+def _redirect_targets(command: str) -> list[str]:
+    """Targets of ``>``-style redirections anywhere in *command*."""
+    # A punctuation-aware shell lexer preserves concatenated quoted and
+    # unquoted word fragments (`"src".py` -> `src.py`) while exposing
+    # redirect operators as tokens. Regex parsing cannot do both safely.
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars="><&|;")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return []
+    targets: list[str] = []
+    for index, token in enumerate(tokens[:-1]):
+        # `2>&1)` inside a `$(...)` capture lexes as `1)`: strip the closing
+        # parens before deciding whether the operand is a descriptor number.
+        candidate = tokens[index + 1].rstrip(")")
+        if not candidate or candidate == "-" or candidate.isdigit():
+            continue
+        if token in _FILE_REDIRECTS or token == ">&":
+            targets.append(candidate)
+    return targets
+
+
+def _writer_targets(tokens: list[str]) -> list[str]:
+    """Targets named in argv by the writers in the module-level tables."""
+    targets: list[str] = []
+    for index, token in enumerate(tokens):
+        base = Path(token).name
+        rest = tokens[index + 1 :]
+        segment: list[str] = []
+        for candidate in rest:
+            if candidate in _SHELL_SEPARATORS:
+                break
+            segment.append(candidate)
+        positional = [c for c in segment if not c.startswith("-")]
+        if base in _EVERY_ARG_WRITERS:
+            targets.extend(positional)
+        elif base in _LAST_ARG_WRITERS and positional:
+            targets.append(positional[-1])
+        elif base in _IN_PLACE_WRITERS and any(
+            _is_in_place_option(option) for option in segment
+        ):
+            if positional:
+                targets.append(positional[-1])
+        elif base == "dd":
+            targets.extend(c[3:] for c in segment if c.startswith("of=") and c[3:])
+        elif base in _OUTPUT_OPTION_WRITERS:
+            for position, candidate in enumerate(segment):
+                if candidate in {"-o", "--output"} and position + 1 < len(segment):
+                    targets.append(segment[position + 1])
+                elif candidate.startswith("--output="):
+                    targets.append(candidate.split("=", 1)[1])
+            if base == "yq" and "-i" in segment and positional:
+                targets.append(positional[-1])
+        elif base == "git":
+            for position, candidate in enumerate(segment):
+                if candidate == "--output" and position + 1 < len(segment):
+                    targets.append(segment[position + 1])
+                elif candidate.startswith("--output="):
+                    targets.append(candidate.split("=", 1)[1])
+    return targets
+
+
+def _bash_write_targets(command: str) -> list[str]:
+    """Explicit write targets of a Bash command, one line at a time.
+
+    A newline separates commands exactly like ``;`` does, so every line is
+    tokenized on its own — a mutating second line can never hide behind a
+    harmless first line.
+    """
+    targets = _redirect_targets(command)
+    for line in command.splitlines():
+        try:
+            tokens = shlex.split(line, comments=False, posix=True)
+        except ValueError:
+            continue
+        targets.extend(_writer_targets(tokens))
+    return targets
+
+
+def has_unresolved_shell_target(paths: list[str]) -> bool:
+    """Return True when Bash would expand a target after policy comparison."""
+    return any(
+        "$" in path
+        or "*" in path
+        or "?" in path
+        or "[" in path
+        or "{" in path
+        or path.startswith("~")
+        for path in paths
+    )
 
 
 def is_docs_only_path(file_path: str) -> bool:
@@ -715,7 +866,23 @@ def main() -> None:
             allow()
 
         target_paths = extract_target_file_paths(tool_call)
+        # Opaque Bash (no extractable write target) is not gated — parity with
+        # the Claude twin and the known #164 limitation. Denying it fail-closed
+        # would also deny the orchestrator's own `VAR=$(...)` captures.
+        if tool_name == "Bash" and not target_paths:
+            allow()
+
         branch = get_branch_name()
+        phase_allowed, phase_error = is_editing_phase(branch)  # one state read
+        if (
+            tool_name == "Bash"
+            and not phase_allowed
+            and has_unresolved_shell_target(target_paths)
+        ):
+            deny(
+                phase_error
+                or "Bash write target blocked: unresolved shell expansion."
+            )
 
         # State-tamper detector (D3): runner-owned MAP state
         # (step_state.json, approval_holds.json, auto-route.json,
@@ -752,9 +919,8 @@ def main() -> None:
         if target_paths and all(is_exempt_path(p) for p in target_paths):
             allow()
 
-        # Phase check (step_state.json)
-        allowed, error = is_editing_phase(branch)
-        if not allowed:
+        # Phase check (step_state.json) — verdict read once above
+        if not phase_allowed:
             research = _current_phase_is_research(branch)
             # RESEARCH exception #1 (docs-only): when EVERY target path is a
             # docs surface (README, runbook, CHANGELOG, anything matching the
@@ -792,7 +958,7 @@ def main() -> None:
                 if constraint_error:
                     deny(constraint_error)
                 allow()
-            deny(error or "Edit blocked: not in an editing phase.")
+            deny(phase_error or "Edit blocked: not in an editing phase.")
 
         # Constraint check (step_state.json)
         constraint_error = check_constraints(branch, target_paths)

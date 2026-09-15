@@ -246,7 +246,37 @@ def _highest_turn_number(scratch_path: Path) -> int:
 # ---------------------------------------------------------------------------
 
 
-_EDIT_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit"})
+_EDIT_TOOLS: frozenset[str] = frozenset({"Edit", "Write", "MultiEdit", "apply_patch"})
+_PATCH_PATH_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$", re.MULTILINE
+)
+_PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to:\s*(.+?)\s*$", re.MULTILINE)
+# Runtime twin of templates_src/_partials/apply-patch-paths.py.jinja (hooks
+# cannot import mapify_cli); keep the two in step.
+
+
+def _apply_patch_paths(payload: object) -> list[str]:
+    """Return explicit file targets from a Codex ``apply_patch`` payload.
+
+    Codex records the call in three shapes: hook ``tool_input`` mappings
+    (``{"command": <patch>}``), rollout ``custom_tool_call`` items whose
+    ``input`` is the raw patch text, and ``function_call`` items whose
+    ``arguments`` is a JSON string. Only explicit patch headers count.
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("command") or payload.get("input") or payload.get("patch")
+    if isinstance(payload, str) and payload.lstrip().startswith("{"):
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError:
+            decoded = None
+        if isinstance(decoded, dict):
+            return _apply_patch_paths(decoded)
+    if not isinstance(payload, str):
+        return []
+    paths = [m.group(1).strip() for m in _PATCH_PATH_RE.finditer(payload)]
+    paths += [m.group(1).strip() for m in _PATCH_MOVE_RE.finditer(payload)]
+    return [path for path in paths if path]
 
 
 def _redact_and_dedup(paths: list[str]) -> list[str]:
@@ -262,14 +292,35 @@ def _redact_and_dedup(paths: list[str]) -> list[str]:
 
 
 def _extract_edit_paths(obj: Any, out: list[str]) -> None:
-    """Recursively collect file paths from Edit/Write/MultiEdit tool_use blocks."""
+    """Recursively collect paths from Claude and Codex transcript records."""
     if isinstance(obj, dict):
-        if obj.get("type") == "tool_use" and obj.get("name") in _EDIT_TOOLS:
+        name = obj.get("tool_name") or obj.get("name")
+        if name == "apply_patch":
+            # Hook payloads carry tool_input; Claude-style tool_use blocks carry
+            # input as a dict; Codex rollout custom_tool_call items carry the
+            # raw patch in input, function_call items a JSON string in arguments.
+            for key in ("tool_input", "input", "arguments"):
+                if key in obj:
+                    out.extend(_apply_patch_paths(obj.get(key)))
+        elif obj.get("type") == "tool_use" and name in _EDIT_TOOLS:
             tool_input = obj.get("input")
             if isinstance(tool_input, dict):
                 raw_path = tool_input.get("file_path") or tool_input.get("path")
                 if raw_path:
                     out.append(str(raw_path))
+
+        # `codex exec --json` emits completed file-change items with one entry
+        # per changed path. Shape-tolerant: the outer envelope has changed
+        # across Codex releases.
+        if obj.get("type") == "file_change":
+            changes = obj.get("changes")
+            if isinstance(changes, list):
+                for change in changes:
+                    if isinstance(change, dict):
+                        raw_path = change.get("path") or change.get("file_path")
+                        if raw_path:
+                            out.append(str(raw_path))
+
         for value in obj.values():
             _extract_edit_paths(value, out)
     elif isinstance(obj, list):
@@ -332,8 +383,7 @@ def _derive_files_touched(
 
     Resolution order:
       1. Inline ``tool_input`` when a PostToolUse-shaped payload carries a
-         ``tool_name`` in {Edit, Write, MultiEdit} (direct/library callers and
-         tests).
+         supported Claude edit tool or Codex ``apply_patch``.
       2. The session transcript referenced by ``transcript_path`` — the Stop
          event that drives capture in production carries no tool fields, so the
          turn's edits are recovered from the transcript (see
@@ -349,9 +399,9 @@ def _derive_files_touched(
         if tool_name not in _EDIT_TOOLS:
             return [], None
         tool_input: dict[str, Any] = stdin_data.get("tool_input") or {}
-        raw_path: str = (
-            tool_input.get("file_path", "") or tool_input.get("path", "") or ""
-        )
+        if tool_name == "apply_patch":
+            return _redact_and_dedup(_apply_patch_paths(tool_input)), None
+        raw_path = tool_input.get("file_path", "") or tool_input.get("path", "")
         if not raw_path:
             return [], None
         return _redact_and_dedup([str(raw_path)]), None

@@ -223,6 +223,16 @@ def test_doc_tables_match_classification(doc_path: Path) -> None:
     found = _doc_classification(doc_path.read_text(encoding="utf-8"))
     rel = doc_path.relative_to(REPO_ROOT)
     for name in sorted(lh.REQUIRE_GUARD | lh.FORBID_GUARD):
+        # hooks/README.md is shipped-only and therefore is not rendered into
+        # the legacy .claude dev tree.  Its checked-in compatibility copy can
+        # only describe hooks that actually exist beside it; Codex-only
+        # composite dispatchers are documented by the rendered shipped README
+        # and the shared hook-patterns reference instead.
+        if (
+            doc_path == REPO_ROOT / ".claude" / "hooks" / "README.md"
+            and not (doc_path.parent / name).exists()
+        ):
+            continue
         expected = "REQUIRE_GUARD" if name in lh.REQUIRE_GUARD else "FORBID_GUARD"
         assert name in found, (
             f"{rel}: hook '{name}' is classified in scripts/lint-hooks.py but "

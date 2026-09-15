@@ -64,10 +64,38 @@ if sys.version_info < (3, 11):  # noqa: UP036
 
 import json
 import os
+import re
 import sys
 
+# --- shared: Codex apply_patch target extraction (rendered from
+# templates_src/_partials/apply-patch-paths.py.jinja; edit the partial) ---
+_APPLY_PATCH_HEADER_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$", re.MULTILINE
+)
+_APPLY_PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def extract_apply_patch_paths(payload: object) -> list[str]:
+    """Return the file targets named by explicit Codex apply_patch headers.
+
+    Accepts the raw patch text or the tool_input mapping Codex hands to hooks
+    (patch text under ``command``, ``input`` or ``patch``). Only explicit
+    ``*** Add/Update/Delete File:`` and ``*** Move to:`` headers count; paths
+    are never inferred from added or removed content. Order is preserved and
+    duplicates are dropped.
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("command") or payload.get("input") or payload.get("patch")
+    if not isinstance(payload, str):
+        return []
+    paths = [m.group(1).strip() for m in _APPLY_PATCH_HEADER_RE.finditer(payload)]
+    paths += [m.group(1).strip() for m in _APPLY_PATCH_MOVE_RE.finditer(payload)]
+    return list(dict.fromkeys(p for p in paths if p))
+
+
 # =============================================================================
-# Default constants (overridable via .map/config.yaml → safe_path_prefixes)
+# Default constants (overridable via .map/config.yaml → dangerous_file_patterns,
+# dangerous_commands, safe_path_prefixes, strict_sensitive_names)
 # =============================================================================
 
 # Dangerous file patterns (case-insensitive)
@@ -164,6 +192,11 @@ DANGEROUS_FILE_PATTERNS = _config.get(
 )
 DANGEROUS_COMMANDS = _config.get("dangerous_commands", _DEFAULT_DANGEROUS_COMMANDS)
 SAFE_PATH_PREFIXES = _config.get("safe_path_prefixes", _DEFAULT_SAFE_PATH_PREFIXES)
+# Opt-in hardening (.map/config.yaml -> strict_sensitive_names: true): check
+# the sensitive-basename blocklist BEFORE the safe directories, so a
+# credentials.json under tests/ or src/ is denied even though its directory is
+# allowlisted. Off by default: safe directories are trusted as-is.
+STRICT_SENSITIVE_NAMES = bool(_config.get("strict_sensitive_names", False))
 
 
 def is_safe_path(path: str) -> bool:
@@ -176,8 +209,9 @@ def check_file_safety(path: str) -> tuple[bool, str]:
     if not path:
         return True, ""
 
-    # Fast path: known safe directories
-    if is_safe_path(path):
+    # Fast path: known safe directories (built-in or safe_path_prefixes) are
+    # trusted as-is unless strict_sensitive_names moves the blocklist first.
+    if not STRICT_SENSITIVE_NAMES and is_safe_path(path):
         return True, ""
 
     # Check dangerous patterns against the basename only, not the full path.
@@ -456,6 +490,16 @@ def main() -> None:
             is_safe, reason = check_verifier_path(file_path)
             if not is_safe:
                 deny(f"{reason} (tool={tool_name})")
+
+    elif tool_name == "apply_patch":
+        for file_path in extract_apply_patch_paths(tool_input):
+            is_safe, reason = check_file_safety(file_path)
+            if not is_safe:
+                deny(f"{reason} (tool={tool_name})")
+            if verifier:
+                is_safe, reason = check_verifier_path(file_path)
+                if not is_safe:
+                    deny(f"{reason} (tool={tool_name})")
 
     # Check bash commands
     elif tool_name == "Bash":

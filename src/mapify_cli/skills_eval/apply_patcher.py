@@ -17,6 +17,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+from mapify_cli.provider_registry import template_skill_root
+
 
 def patch_skill_description(skill_md_path: Path, new_description: str) -> None:
     """Rewrite the ``description:`` block scalar in a SKILL.md.jinja frontmatter.
@@ -115,6 +117,7 @@ def apply_optimized_description(
     no_improvement: bool,
     repo_root: Path,
     stage: bool = True,
+    provider: str = "claude",
 ) -> str:
     """Apply ``winner`` description to the skill's single-source .jinja template.
 
@@ -157,7 +160,16 @@ def apply_optimized_description(
     # Path-safety runs first so a traversal/.git target is rejected even when the
     # file does not exist (resolve() normalises '..' without requiring existence).
     templates_src_root = (repo_root / "src" / "mapify_cli" / "templates_src").resolve()
-    jinja = repo_root / "src" / "mapify_cli" / "templates_src" / "skills" / skill / "SKILL.md.jinja"
+    provider_root = template_skill_root(provider)
+    jinja = (
+        repo_root
+        / "src"
+        / "mapify_cli"
+        / "templates_src"
+        / provider_root
+        / skill
+        / "SKILL.md.jinja"
+    )
     resolved = jinja.resolve()
 
     # Intent: reject paths that escape templates_src or touch .git/

@@ -11500,6 +11500,113 @@ class TestTokenAccounting:
         assert usage["input"] == 5
         assert usage["msg_id"] == "m"
 
+    def test_extract_turn_usage_supports_codex_turn_completed(self):
+        usage = map_step_runner._extract_turn_usage(
+            {
+                "type": "turn.completed",
+                "turn_id": "turn-7",
+                "usage": {
+                    "input_tokens": 120,
+                    "cached_input_tokens": 20,
+                    "output_tokens": 9,
+                },
+            }
+        )
+        assert usage == {
+            "input": 100,
+            "output": 9,
+            "cache_creation": 0,
+            "cache_read": 20,
+            "model": "",
+            "msg_id": "turn-7",
+            "provider": "codex",
+        }
+
+    def test_extract_turn_usage_supports_codex_rollout_token_count(self):
+        usage = map_step_runner._extract_turn_usage(
+            {
+                "timestamp": "2026-09-14T10:00:00Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 10_000,
+                            "cached_input_tokens": 4_000,
+                            "output_tokens": 900,
+                        },
+                        "last_token_usage": {
+                            "input_tokens": 120,
+                            "cached_input_tokens": 20,
+                            "output_tokens": 9,
+                        },
+                    },
+                },
+            }
+        )
+        assert usage == {
+            "input": 100,
+            "output": 9,
+            "cache_creation": 0,
+            "cache_read": 20,
+            "model": "",
+            "msg_id": "2026-09-14T10:00:00Z",
+            "provider": "codex",
+        }
+
+    def test_iter_new_usage_deduplicates_repeated_rollout_event(self, tmp_path):
+        transcript = tmp_path / "rollout.jsonl"
+        event = {
+            "timestamp": "2026-09-14T10:00:00Z",
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {"input_tokens": 999},
+                    "last_token_usage": {
+                        "input_tokens": 12,
+                        "cached_input_tokens": 2,
+                        "output_tokens": 3,
+                    },
+                },
+            },
+        }
+        transcript.write_text(
+            json.dumps(event) + "\n" + json.dumps(event) + "\n",
+            encoding="utf-8",
+        )
+
+        usages, offset = map_step_runner._iter_new_usage(transcript, set())
+        assert len(usages) == 1
+        assert usages[0]["input"] == 10
+        assert usages[0]["output"] == 3
+        repeated, repeated_offset = map_step_runner._iter_new_usage(
+            transcript, {"2026-09-14T10:00:00Z"}, 0
+        )
+        assert repeated == []
+        assert repeated_offset == offset
+
+    def test_iter_new_usage_deduplicates_idless_codex_turns(self, tmp_path):
+        transcript = tmp_path / "codex.jsonl"
+        event = {
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 11,
+                "cached_input_tokens": 1,
+                "output_tokens": 2,
+            },
+        }
+        transcript.write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+        usages, offset = map_step_runner._iter_new_usage(transcript, set())
+        assert len(usages) == 1
+        assert usages[0]["msg_id"] == "codex-offset-0"
+        repeated, repeated_offset = map_step_runner._iter_new_usage(
+            transcript, {"codex-offset-0"}, 0
+        )
+        assert repeated == []
+        assert repeated_offset == offset
+
     def test_token_cost_uses_model_price(self):
         usage = {"input": 1_000_000, "output": 0, "cache_creation": 0, "cache_read": 0}
         assert map_step_runner._token_cost(usage, "claude-opus-4-7") == 15.0

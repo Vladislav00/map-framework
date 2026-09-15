@@ -51,6 +51,32 @@ from datetime import UTC, datetime
 from fnmatch import fnmatch
 from pathlib import Path
 
+# --- shared: Codex apply_patch target extraction (rendered from
+# templates_src/_partials/apply-patch-paths.py.jinja; edit the partial) ---
+_APPLY_PATCH_HEADER_RE = re.compile(
+    r"^\*\*\* (?:Add|Update|Delete) File:\s*(.+?)\s*$", re.MULTILINE
+)
+_APPLY_PATCH_MOVE_RE = re.compile(r"^\*\*\* Move to:\s*(.+?)\s*$", re.MULTILINE)
+
+
+def extract_apply_patch_paths(payload: object) -> list[str]:
+    """Return the file targets named by explicit Codex apply_patch headers.
+
+    Accepts the raw patch text or the tool_input mapping Codex hands to hooks
+    (patch text under ``command``, ``input`` or ``patch``). Only explicit
+    ``*** Add/Update/Delete File:`` and ``*** Move to:`` headers count; paths
+    are never inferred from added or removed content. Order is preserved and
+    duplicates are dropped.
+    """
+    if isinstance(payload, dict):
+        payload = payload.get("command") or payload.get("input") or payload.get("patch")
+    if not isinstance(payload, str):
+        return []
+    paths = [m.group(1).strip() for m in _APPLY_PATCH_HEADER_RE.finditer(payload)]
+    paths += [m.group(1).strip() for m in _APPLY_PATCH_MOVE_RE.finditer(payload)]
+    return list(dict.fromkeys(p for p in paths if p))
+
+
 # Keep in sync with map_step_runner.py GOAL_HEADING_RE
 GOAL_HEADING_RE = r"## (?:Goal|Overview)\n(.*?)(?=\n##|\Z)"
 REMINDER_LIMIT = 700
@@ -810,7 +836,8 @@ def _paths_match_file(rule_paths: list[str], file_path: str) -> bool:
 def _extract_target_file(tool_name: str, tool_input: dict) -> str:
     """Extract the target file path from a tool invocation.
 
-    For Edit/Write/MultiEdit, reads ``file_path`` directly.
+    For Edit/Write/MultiEdit, reads ``file_path`` directly. For Codex
+    ``apply_patch``, returns the first explicit patch header path.
     For Bash, returns empty — we cannot reliably determine which files
     a command operates on without parsing arbitrary shell syntax.
     """
@@ -818,6 +845,8 @@ def _extract_target_file(tool_name: str, tool_input: dict) -> str:
         file_path = tool_input.get("file_path", "")
         if isinstance(file_path, str) and file_path.strip():
             return file_path.strip()
+    if tool_name == "apply_patch":
+        return next(iter(extract_apply_patch_paths(tool_input)), "")
     return ""
 
 
@@ -963,7 +992,7 @@ def main() -> None:
     command = ""
     conflict_context = ""
 
-    if tool_name in ("Edit", "Write", "MultiEdit"):
+    if tool_name in ("Edit", "Write", "MultiEdit", "apply_patch"):
         should_inject = True
     elif tool_name == "Bash":
         command_value = tool_input.get("command", "")
@@ -1021,7 +1050,7 @@ def main() -> None:
     # already doing exactly that — consecutive atomic Edits in the same
     # ACTOR turn shouldn't be lectured.
     if (
-        tool_name in ("Edit", "Write", "MultiEdit")
+        tool_name in ("Edit", "Write", "MultiEdit", "apply_patch")
         and isinstance(state, dict)
         and state.get("current_step_phase") in ("ACTOR", "TEST_WRITER")
     ):
@@ -1034,7 +1063,7 @@ def main() -> None:
     # silent — a verification run needs no completion nag.
     if (
         reminder is None
-        and tool_name in ("Edit", "Write", "MultiEdit")
+        and tool_name in ("Edit", "Write", "MultiEdit", "apply_patch")
         and _state_is_terminal(state)
     ):
         reminder = _TERMINAL_NOTICE

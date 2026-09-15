@@ -11,12 +11,14 @@ Invariants enforced here:
 - No ``import anthropic``, no ANTHROPIC_API_KEY access (INV-1 / HC-2 / AC-10).
 - No ``--model`` flag (D2).
 """
+
 from __future__ import annotations
 
 import json
 import os
 import subprocess
 
+from mapify_cli.codex_exec import codex_exec_argv, parse_codex_exec_events
 from mapify_cli.skills_eval.eval_schema import EvalResultRecord
 
 # Default subprocess timeout in seconds.
@@ -47,7 +49,7 @@ def _build_prompt(
     Record content (.prompt, .assertions_failed) is treated as UNTRUSTED text.
     """
     lines: list[str] = [
-        "You are optimizing the trigger description of a Claude Code skill.",
+        "You are optimizing the trigger description of an agent skill.",
         "",
         "Current description:",
         current_description.strip(),
@@ -70,10 +72,12 @@ def _build_prompt(
         "skill to be triggered for the failing prompts above while remaining",
         "precise and not overly broad.",
         "",
-        (f"HARD LIMIT: the new description MUST be at most {max_chars} characters "
-        f"(aim for ~{max(0, max_chars - 20)} to be safe). It is shown in a UI that "
-        "truncates anything longer, so a longer description is unusable no matter "
-        "how well it triggers. Count characters and stay within the limit."),
+        (
+            f"HARD LIMIT: the new description MUST be at most {max_chars} characters "
+            f"(aim for ~{max(0, max_chars - 20)} to be safe). It is shown in a UI that "
+            "truncates anything longer, so a longer description is unusable no matter "
+            "how well it triggers. Count characters and stay within the limit."
+        ),
         "",
         "Respond with ONLY the new description text, no preamble, no explanation.",
     ]
@@ -151,4 +155,34 @@ def propose_description(
     if len(candidate) > max_chars:
         return None
 
+    return candidate
+
+
+def propose_description_codex(
+    current_description: str,
+    failing_train_records: list[EvalResultRecord],
+    max_chars: int = _DEFAULT_MAX_CHARS,
+) -> str | None:
+    """Propose a description through ``codex exec --json``."""
+    prompt = _build_prompt(current_description, failing_train_records, max_chars)
+    try:
+        proc = subprocess.run(
+            codex_exec_argv(),
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=_DEFAULT_TIMEOUT,
+            cwd=str(os.getcwd()),
+            env={**os.environ, "MAP_INVOKED_BY": _MAP_INVOKED_BY_VALUE},
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    except Exception:  # noqa: BLE001
+        return None
+    if proc.returncode != 0:
+        return None
+    candidate = parse_codex_exec_events(proc.stdout or "").response.strip()
+    if not candidate or len(candidate) > max_chars:
+        return None
     return candidate

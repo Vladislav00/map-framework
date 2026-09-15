@@ -1,48 +1,22 @@
 # Adversarial Review Reference
 
 Detailed workflow for `$map-review --adversarial`. See [SKILL.md](SKILL.md)
-for context and integration points. This is the Codex counterpart to Claude
-`--adversarial`: the same five-reviewer contract, run as SEQUENTIAL
-IN-SESSION passes by the current Codex session instead of a parallel agent
-fan-out.
+for context and integration points. It preserves the five-reviewer contract
+using Codex configured subagents and concurrent dispatch where the passes are
+independent.
 
-## Design note: why sequential in-session passes, not spawn_agent()
+## Dispatch design
 
-The currently-registered Codex agent types are `researcher`, `decomposer`,
-`monitor`, `predictor`, `evaluator` (see `config.toml.jinja` and the
-`agents/*.toml.jinja` files). None of them is "blind hunter", "edge case
-hunter", or "acceptance auditor" — those are ad-hoc, generically-typed
-reviewer roles in the sibling implementation for another AI harness, not
-registered Codex agent types.
-
-**Whether `spawn_agent()` can target a NEW, ad-hoc, unregistered agent name
-(one outside the five above) is an UNVERIFIED ASSUMPTION carried over from
-discovery, not a proven platform limitation.** This file deliberately does
-NOT resolve that assumption — it picks the simpler, verifiably-correct
-option instead: run the five reviewer passes sequentially in the current
-Codex session, with the session itself switching context/persona between
-passes, rather than betting on an unconfirmed dispatch capability.
-
-Spot-check performed during research: reviewed `spawn_agent` usage in the
-existing map-plan Codex port
-(`src/mapify_cli/templates_src/codex/skills/map-plan/SKILL.md.jinja`) and
-`docs/ARCHITECTURE.md`. Every `spawn_agent(agent_type=...)` call site in
-map-plan targets one of the five registered types above; no example
-anywhere spawns an ad-hoc unregistered agent name. `docs/ARCHITECTURE.md`
-documents the audited dispatch sites and registered agent roster but does
-not state whether the underlying platform primitive accepts arbitrary
-`agent_type` strings. No Codex platform documentation is available in this
-repo or environment to confirm or deny ad-hoc agent spawning either way.
-**Treat this as open and unresolved** — if a future change confirms
-`spawn_agent()` does support ad-hoc names, revisit this file and the
-parallel-fan-out design can be reconsidered; do not assume it silently
-works today.
+Codex dispatch targets configured roles rather than inventing ad-hoc agent
+names. Use `monitor` for Blind and Edge Case, `evaluator` for Acceptance,
+`predictor` for User Experience, and `documentation-reviewer` for Maintainer.
+Each prompt supplies the narrower reviewer persona and permitted inputs. Spawn
+the independent passes in one batch when concurrency is available; otherwise
+dispatch them sequentially without merging their contexts.
 
 ## Overview
 
-Five reviewer passes, each with only its permitted inputs, run ONE AFTER
-ANOTHER in the current session (never in parallel, never via a new
-agent-dispatch primitive):
+Five reviewer passes, each with only its permitted inputs:
 
 | Pass | Context | Finds |
 |------|---------|-------|
@@ -62,10 +36,9 @@ aggregator — reported, never counted. See
 [review-reference.md](review-reference.md#role-reviewers) for what each role
 checks.
 
-Between passes, deliberately narrow the session's working context to match
-the pass's permitted inputs (e.g. do not consult the spec while running the
-Blind Hunter pass) so the passes stay as independent as a sequential,
-single-session execution allows.
+Keep every prompt scoped to its permitted inputs (for example, do not supply
+the spec to Blind Hunter), and collect each result independently before
+aggregation.
 
 ## Step B.adversarial.0: Build adversarial review prompts
 
@@ -94,22 +67,23 @@ MAINTAINER_PROMPT=$(printf '%s' "$ADV_PROMPTS_JSON" | python3 -c 'import json,sy
 port calls — payload flows out via stdout JSON only, never via argv, per
 the stdin-safe piping convention used throughout this skill.
 
-## Step B.adversarial.1: Run all five passes sequentially, in-session
+## Step B.adversarial.1: Dispatch all five passes
 
 ```text
-# Run the five adversarial reviewer passes ONE AFTER ANOTHER in the
-# current Codex session. Do NOT call spawn_agent() for these passes and do
-# NOT invent a new agent-dispatch primitive — see "Design note" above for
-# why. Each pass consumes only its permitted context (BLIND_PROMPT /
-# EDGE_PROMPT / ACCEPTANCE_PROMPT / USER_EXPERIENCE_PROMPT /
-# MAINTAINER_PROMPT) and produces its own JSON finding report before the
-# next pass begins.
+Dispatch these independent calls together when slots permit; every call must
+include a unique `task_name`, its generated prompt as `message`, and a reminder
+that the reviewer is read-only and must return only the required JSON:
 
-Pass 1 (Blind Hunter):      execute BLIND_PROMPT in-session -> BLIND_OUTPUT
-Pass 2 (Edge Case Hunter):  execute EDGE_PROMPT in-session -> EDGE_OUTPUT   (skip if --quick)
-Pass 3 (Acceptance Auditor): execute ACCEPTANCE_PROMPT in-session -> ACCEPTANCE_OUTPUT
-Pass 4 (User):               execute USER_EXPERIENCE_PROMPT in-session -> USER_EXPERIENCE_OUTPUT
-Pass 5 (Maintainer):         execute MAINTAINER_PROMPT in-session -> MAINTAINER_OUTPUT
+Blind Hunter:       spawn_agent(agent_type="monitor", task_name="review_blind", message=BLIND_PROMPT)
+Edge Case Hunter:   spawn_agent(agent_type="monitor", task_name="review_edge", message=EDGE_PROMPT) (skip under --quick)
+Acceptance Auditor: spawn_agent(agent_type="evaluator", task_name="review_acceptance", message=ACCEPTANCE_PROMPT)
+User Experience:   spawn_agent(agent_type="predictor", task_name="review_user_experience", message=USER_EXPERIENCE_PROMPT)
+Maintainer:         spawn_agent(agent_type="documentation-reviewer", task_name="review_maintainer", message=MAINTAINER_PROMPT)
+
+Wait for all dispatched reviewers and map their final JSON to `BLIND_OUTPUT`,
+`EDGE_OUTPUT`, `ACCEPTANCE_OUTPUT`, `USER_EXPERIENCE_OUTPUT`, and
+`MAINTAINER_OUTPUT`. If concurrency is unavailable, make the same calls
+sequentially; do not replace independent review with parent-session personas.
 ```
 
 ## Step B.adversarial.2: Validate reviewer outputs
