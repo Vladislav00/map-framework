@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.30.0] - 2026-09-15
+
 ### Added
 - **Full Codex CLI provider support.** `mapify init --provider codex` now installs
   all 23 MAP skills under `.agents/skills/`, the shared references under
