@@ -49,6 +49,10 @@ from mapify_cli.auto_update import (
     check_and_update,
 )
 from mapify_cli.delivery import create_map_tools
+from mapify_cli.delivery.file_copier import (
+    _IGNORED_TEMPLATE_NAMES,
+    _IGNORED_TEMPLATE_SUFFIXES,
+)
 from mapify_cli.install_manifest import read_manifest
 from mapify_cli.update_install import (
     InstallKind,
@@ -4985,14 +4989,12 @@ class TestCodexProvider:
     @staticmethod
     def _delivered_tree_inventory(root: Path) -> set[Path]:
         """Return files copied by the Codex tree copier's standard filters."""
-        ignored_names = {"__pycache__", ".DS_Store"}
-        ignored_suffixes = {".pyc", ".pyo"}
         return {
             path.relative_to(root)
             for path in root.rglob("*")
             if path.is_file()
-            and not any(part in ignored_names for part in path.parts)
-            and path.suffix not in ignored_suffixes
+            and not any(part in _IGNORED_TEMPLATE_NAMES for part in path.parts)
+            and path.suffix not in _IGNORED_TEMPLATE_SUFFIXES
         }
 
     # ------------------------------------------------------------------ #
@@ -5093,7 +5095,7 @@ class TestCodexProvider:
         )
 
     # ------------------------------------------------------------------ #
-    # AC-6: complete provider inventory and non-destructive script repair #
+    # AC-6: complete provider inventory and Claude-parity script refresh   #
     # ------------------------------------------------------------------ #
 
     def test_ac06_clean_install_has_complete_provider_inventory(self, codex_project):
@@ -5118,52 +5120,75 @@ class TestCodexProvider:
         assert self._delivered_tree_inventory(agents_skills) == expected_skills
         assert self._delivered_tree_inventory(codex_dir) == expected_codex
 
-    def test_ac06_partial_map_scripts_are_repaired_without_overwrite(self, tmp_path):
-        """AC-6: missing shipped scripts are added and existing files preserved."""
+    def test_ac06_existing_map_scripts_are_refreshed_like_claude(self, tmp_path):
+        """AC-6: a partial .map/scripts is completed and stale shipped scripts refreshed.
+
+        Same policy as the Claude provider's ``_copy_map_path``: shipped names are
+        overwritten (a drifted managed copy gets a ``.bak.<ts>`` first), files the
+        template does not ship are never touched.
+        """
         templates_scripts = get_templates_dir() / "map" / "scripts"
         expected_scripts = self._delivered_tree_inventory(templates_scripts)
+        shipped_runner = (templates_scripts / "map_step_runner.py").read_bytes()
 
         project = tmp_path / "partial_install"
         project.mkdir()
         scripts_dir = project / ".map" / "scripts"
         scripts_dir.mkdir(parents=True)
-        existing_script = scripts_dir / "map_step_runner.py"
-        existing_bytes = b"#!/usr/bin/env python3\n# user-preserved bytes\n"
-        existing_script.write_bytes(existing_bytes)
+        stale_script = scripts_dir / "map_step_runner.py"
+        stale_bytes = b"#!/usr/bin/env python3\n# stale pre-upgrade runtime\n"
+        stale_script.write_bytes(stale_bytes)
         custom_script = scripts_dir / "custom.py"
         custom_bytes = b"# user custom script\n"
         custom_script.write_bytes(custom_bytes)
 
         runner2 = CliRunner()
         os.chdir(project)
-        result = runner2.invoke(
-            app, ["init", ".", "--provider", "codex", "--no-git", "--force"]
-        )
+        init_args = ["init", ".", "--provider", "codex", "--no-git", "--force"]
+        result = runner2.invoke(app, init_args)
         assert result.exit_code == 0, f"init failed: {result.output}"
-        assert existing_script.read_bytes() == existing_bytes
+        refreshed = stale_script.read_bytes()
+        assert refreshed != stale_bytes, "stale shipped script must be refreshed"
+        # The managed install injects a MAP-MANAGED header right after the
+        # shebang, so compare the shipped body below the shebang line.
+        assert b"MAP-MANAGED" in refreshed
+        assert shipped_runner.split(b"\n", 1)[1].strip() in refreshed, (
+            "refreshed script must carry the shipped runtime body"
+        )
         assert custom_script.read_bytes() == custom_bytes
         assert self._delivered_tree_inventory(scripts_dir) == expected_scripts | {
             Path("custom.py")
         }
-        assert all((scripts_dir / path).exists() for path in expected_scripts), (
-            "Every missing shipped .map/scripts file must be installed"
-        )
+
+        # A user edit on the managed copy is backed up, then refreshed (drift).
+        stale_script.write_bytes(refreshed + b"\n# local edit on managed copy\n")
+        result = runner2.invoke(app, init_args + ["--refresh-existing"])
+        assert result.exit_code == 0, f"refresh failed: {result.output}"
+        assert b"local edit on managed copy" not in stale_script.read_bytes()
+        backups = sorted(scripts_dir.glob("map_step_runner.py.*.bak"))
+        assert len(backups) == 1, "drifted managed script must be backed up once"
+        assert b"local edit on managed copy" in backups[0].read_bytes()
+        assert custom_script.read_bytes() == custom_bytes
 
     def test_ac06_symlinked_map_scripts_is_rejected_without_external_writes(
         self, tmp_path
     ):
-        """AC-6: runtime repair must never follow a project scripts symlink."""
+        """AC-6: runtime install must never follow a project scripts symlink."""
         project = tmp_path / "symlinked_scripts"
         project.mkdir()
         external_scripts = tmp_path / "external_scripts"
         external_scripts.mkdir()
         sentinel = external_scripts / "sentinel.bin"
         sentinel.write_bytes(b"external-runtime-sentinel\x00\xff")
-        before = {
-            path.relative_to(external_scripts): path.read_bytes()
-            for path in external_scripts.rglob("*")
-            if path.is_file()
-        }
+
+        def snapshot() -> dict[Path, bytes]:
+            return {
+                path.relative_to(external_scripts): path.read_bytes()
+                for path in external_scripts.rglob("*")
+                if path.is_file()
+            }
+
+        before = snapshot()
 
         scripts_dir = project / ".map" / "scripts"
         scripts_dir.parent.mkdir()
@@ -5188,16 +5213,16 @@ class TestCodexProvider:
             ],
         )
 
+        # A plain `Error:` line and exit 1 -- no uncaught traceback (typer.Exit).
         assert result.exit_code == 1
-        assert isinstance(result.exception, RuntimeError)
-        assert "unsafe Codex runtime destination" in str(result.exception)
-        assert "symbolic links are not allowed" in str(result.exception)
+        assert isinstance(result.exception, SystemExit)
+        flat_output = " ".join(result.output.split())  # rich wraps at 80 cols
+        assert "Error:" in flat_output
+        assert "is a symbolic link" in flat_output
+        assert "Replace the link with a real directory" in flat_output
+        assert "Traceback" not in flat_output
         assert scripts_dir.is_symlink()
-        after = {
-            path.relative_to(external_scripts): path.read_bytes()
-            for path in external_scripts.rglob("*")
-            if path.is_file()
-        }
+        after = snapshot()
         assert after == before
         assert set(after) == {Path("sentinel.bin")}
 
