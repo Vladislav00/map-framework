@@ -58,6 +58,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and upgrades see it.
 - Memory capture under Codex records the files edited via `apply_patch` from real
   rollout transcripts (`custom_tool_call` with a string `input`).
+- **MAP state transactions are serialized per branch.** Complete
+  read-modify-write transactions on `.map/<branch>/` state now run under a
+  per-branch lock, temp files are invocation-unique (`tempfile.mkstemp` +
+  `os.replace`) with Windows-safe newline handling, and the workflow terminal,
+  blocked-route and approval-hold semantics are corrected. (#447, fixes #446)
+- **All `.map/` state and artifact writes in `map_step_runner.py` and
+  `map_orchestrator.py` are atomic.** Twenty-plus remaining `Path.write_text()`
+  calls (blueprint.json, active-issues.json, known-issues.json,
+  artifact_manifest.json, retry_quarantine.json, task plan, baselines, approval
+  holds, feedback/review/handoff markdown, diagnostics ledger, worktree patches)
+  go through `atomic_write_text` / `_write_json_file` / `_write_text_file`, so a
+  crash mid-write can no longer leave a truncated file, and two concurrent
+  orchestrators cannot collide on a shared `.tmp` name. (#450, #452, #454, #457)
+- `atomic_write_text` cleanup catches `OSError` instead of only
+  `FileNotFoundError`, so a `PermissionError` from `os.replace` is no longer
+  masked by the temp-file unlink; `route_task` includes `block_reason` in its
+  return dict only when the chain is blocked, matching the on-disk artifact
+  schema. (#448)
+- `write_review_verdict_ledger`, `write_implementer_readiness_review`,
+  `write_prd_review` and `record_prd_review_decision` honour `--help` (exit 0,
+  nothing written under `.map/`) and reject unknown flags with exit 1 instead of
+  silently treating them as positional arguments. (#459)
 
 ## [3.29.1] - 2026-08-29
 
